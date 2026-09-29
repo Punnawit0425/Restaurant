@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+dist-ssr/
+frontend/dist/
+
+# Runtime / local state
+backend/data.json
+# persist() writes here and renames over data.json; a killed server leaves one behind
+backend/data.json.tmp
+# Rolling data.json snapshots (contain staff password hashes — never commit)
+backend/backups/
+# Hand-made rescue dumps of live state. Same contents as a backup — staff
+# passHash/pinHash, the PromptPay id, every bill — so they are kept out for the
+# same reason. Keep them somewhere outside the repo if you still need them.
+_recovery/
+# Menu photos uploaded by the owner — user content, not source
+backend/uploads/
+*.local
+
+# Database dumps (pg_dump output). The schema lives in the *_schema.sql files;
+# a full dump is a snapshot to hand to someone, not source. Kept out so a fresh
+# `pg_dump` dropped in here is never swept up by `git add .`.
+restaurant_db.sql
+*_dump.sql
+
+# Logs
+*.log
+logs/
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,19 @@
+# Never copy local machine state into the image — it gets rebuilt/mounted.
+node_modules
+**/node_modules
+frontend/dist
+backend/data.json
+backend/backups
+backend/uploads
+# Rescue dumps of live state (staff credential hashes, bills) — never ship these
+# in the image. Gitignored too; listed here as well because COPY . . reads this
+# file, not .gitignore.
+_recovery
+# Dev-only SSR smoke-test scripts; nothing in the app imports them.
+frontend/scripts
+**/.env
+**/.env.*
+!**/.env.example
+.git
+*.log
+.DS_Store

@@ -1,0 +1,22 @@
+{
+  "name": "restaurant-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared API + real-time (SSE) server for the restaurant app. Lets the customer tab and the staff tab talk to each other.",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env server.js",
+    "start": "node --env-file-if-exists=.env server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.3.0",
+    "pg": "^8.22.0"
+  },
+  "overridesComment": "express 4.22.2 is the last 4.x and pins qs 6.15.3, which carries an array-limit bypass and a DoS (GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g). 6.16.0 fixes both and is API-compatible — express's own body-parser already resolves to it. Drop this override when moving to express 5.",
+  "overrides": {
+    "qs": "^6.16.0"
+  }
+}

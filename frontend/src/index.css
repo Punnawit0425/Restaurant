@@ -1,0 +1,528 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    transition: background-color 0.5s ease, color 0.5s ease;
+  }
+
+  /* A bare `border` (no colour class) falls back to Tailwind's preflight
+     default, a fixed light grey — which drew pale hairlines all over the
+     near-black night theme. Point that default at a variable instead so it
+     follows the theme. The day value is preflight's own grey, so nothing
+     about the day theme moves.
+
+     This sits in @layer base, after preflight, so it wins over preflight but
+     still loses to any explicit `border-*` utility. */
+  *,
+  ::before,
+  ::after {
+    border-color: var(--c-border-default, #E5E7EB);
+  }
+
+  /* ช่องกรอกข้อความที่ไม่ได้ใส่คลาสสีพื้นไว้เอง
+
+     preflight ของ Tailwind ตั้ง `color: inherit` ให้ input/textarea แต่ไม่แตะ
+     พื้นหลัง ช่องจึงได้พื้น "สีขาว" จากเบราว์เซอร์เสมอ พอเป็นธีมกลางคืน
+     ตัวอักษรที่สืบทอดลงมาเป็นสีครีม = ครีมบนขาว มองไม่เห็นตอนพิมพ์เลย
+     (จุดที่เจอ: ช่องหมายเหตุถึงครัวในหน้าลูกค้า)
+
+     ตั้งค่าตั้งต้นให้เดินตามธีมเสียตรงนี้ทีเดียว ช่องที่เพิ่มมาทีหลังจะถูก
+     ตั้งแต่แรกโดยไม่ต้องจำ ห่อด้วย :where() เพื่อให้ specificity เป็น 0
+     คลาส bg-* / text-* ที่เขียนไว้ที่ไหนก็ยังทับได้เหมือนเดิมทุกจุด
+     (เว้น checkbox/radio/range/color/file ที่ต้องปล่อยให้เบราว์เซอร์วาดเอง) */
+  :where(textarea),
+  :where(select),
+  :where(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file'])) {
+    background-color: var(--c-field, #FFFFFF);
+    color: var(--c-field-ink, #262626);
+  }
+}
+
+/* ============================================================
+   จานสีของแอป — แก้สีทุกอย่างได้ที่นี่ที่เดียว
+
+   วิธีใช้: เปลี่ยนเลข hex ข้างล่าง กด save แล้วดูที่เบราว์เซอร์ได้เลย
+   ทุกหน้าเปลี่ยนตามทันที ไม่ต้องแก้ไฟล์อื่นและไม่ต้อง restart
+
+   แต่ละธีมเริ่มด้วยกลุ่ม "6 สีหลัก" ซึ่งเป็นสีที่เห็นชัดที่สุด
+   อยากลองเปลี่ยนอารมณ์ทั้งแอปเร็วๆ แก้แค่ 6 บรรทัดนั้นพอ
+   ที่เหลือด้านล่างเป็นรายละเอียดปลีกย่อย ค่อยๆ ไล่ปรับทีหลังได้
+
+   ข้อควรระวัง: ใส่เป็น hex ล้วนเท่านั้น (เช่น #14100C)
+   ห้ามใส่ rgba() หรือสีโปร่งแสง เพราะ Tailwind อ่านค่าพวกนี้ไปใช้ต่อ
+
+   (สำหรับคนแก้โค้ด: ชื่อตัวแปรผูกกับคลาส Tailwind ใน tailwind.config.js
+    --c-card คือ bg-card, --c-ink คือ text-ink, --c-line คือ border-line)
+   ============================================================ */
+
+/* ---------- ธีมกลางวัน ---------- */
+.theme-day {
+  /* ===== 6 สีหลัก — แก้แค่กลุ่มนี้ก็เปลี่ยนอารมณ์ทั้งแอปแล้ว ===== */
+  --c-app: #FFF7F0;          /* พื้นหลังแอป */
+  --c-strip: #F7F3EB;        /* แถบหัว + แถบล่าง */
+  --c-card: #FFFFFF;         /* การ์ดเมนู */
+  --c-ink: #4A3E3D;          /* ตัวอักษรหลัก */
+  --c-accent: #7B2D12;       /* ราคา */
+  --c-cta: #A25B34;          /* ปุ่มตะกร้าใหญ่ด้านล่าง */
+
+  /* ===== ตัวอักษร ===== */
+  --c-ink-2: #737373;        /* คำอธิบายใต้ชื่อเมนู */
+  --c-ink-3: #A3A3A3;        /* ตัวอักษรจางๆ เช่น footer */
+  --c-title: #5A2E14;        /* ชื่อเมนู */
+  --c-heading: #6B4A32;      /* หัวข้อหมวดหมู่ */
+  --c-link: #D97706;         /* ลิงก์กดได้ */
+  --c-header-ink: #FFFFFF;   /* ตัวอักษรบนแถบหัว (กลางวันอยู่บนลายไม้) */
+
+  /* ===== พื้นผิวย่อย ===== */
+  --c-card-hover: #FAFAFA;   /* การ์ดเมนูตอนเอาเมาส์ชี้ */
+  --c-strip-soft: #FCF5EE;   /* แถบสถานะออเดอร์ (จางกว่า --c-strip) */
+  --c-raised: #FFFFFF;       /* ปุ่มเล็กบนแถบหัว */
+  --c-raised-hover: #FAFAFA;
+  --c-raised-ink: #6B4021;   /* ตัวอักษร/ไอคอนในปุ่มเล็ก */
+  --c-logo: #FBEAD3;         /* กรอบโลโก้บนแถบหัว */
+  --c-well: #DCEBF7;         /* กรอบรูปอาหาร (กลางวันไล่สีไป --c-well-2) */
+  --c-well-2: #CDE3B8;
+
+  /* ===== เส้นขอบ ===== */
+  --c-line: #FFEDD5;         /* เส้นขอบทั่วไป */
+  --c-line-strong: #E5E5E5;  /* เส้นขอบที่เข้มกว่า */
+
+  /* ===== ช่องกรอกข้อความ =====
+     ค่าตั้งต้นของ input/textarea/select ทุกช่องที่ไม่ได้ระบุสีเอง
+     (ดูกฎที่ใช้ค่านี้ในบล็อก @layer base ด้านบนสุดของไฟล์) */
+  --c-field: #FFFFFF;        /* พื้นช่องกรอก */
+  --c-field-ink: #262626;    /* ตัวอักษรที่พิมพ์ลงไป */
+
+  /* ===== ปุ่ม ===== */
+  --c-cta-hover: #8D4F2C;    /* ปุ่มตะกร้าตอนชี้ */
+  --c-cta-ink: #FFFFFF;      /* ตัวอักษรในปุ่มตะกร้า */
+  --c-add: #A9713D;          /* ปุ่มกลม + ท้ายรายการอาหาร */
+  --c-add-hover: #8A5A32;
+  --c-add-ink: #FFFFFF;
+
+  /* ===== เฉดสีเทา (ใช้ทั่วหน้าพนักงาน + หลังบ้าน) =====
+     ค่าพวกนี้คือ neutral-50 ... neutral-950 ของ Tailwind ที่ถูกดึงมาทำเป็น
+     ตัวแปร หน้าพนักงาน/หลังบ้านเขียนด้วย text-neutral-500, bg-neutral-100
+     อยู่แล้ว พอเปลี่ยนค่าตรงนี้ทั้งสองหน้าก็สลับธีมตามได้ทันที
+
+     ข้อควรระวัง: ต้องเป็นเลข R G B คั่นด้วยเว้นวรรค (ไม่ใช่ hex ไม่มีคอมมา)
+     เพราะคลาสแบบ bg-neutral-900/20 ต้องเอาไปใส่ค่าความโปร่งใสต่อ */
+  --n-50: 250 250 250;
+  --n-100: 245 245 245;
+  --n-150: 240 240 240;
+  --n-200: 229 229 229;
+  --n-300: 212 212 212;
+  --n-400: 163 163 163;
+  --n-500: 115 115 115;
+  --n-600: 82 82 82;
+  --n-700: 64 64 64;
+  --n-800: 38 38 38;
+  --n-900: 23 23 23;
+  --n-950: 10 10 10;
+
+  /* ===== ปุ่มทึบในหน้าพนักงาน/หลังบ้าน ===== */
+  --c-ctl: #262626;          /* ปุ่มหลัก เช่น "+ เพิ่มพนักงาน" */
+  --c-ctl-hover: #404040;
+  --c-ctl-ink: #FFFFFF;      /* ตัวอักษรในปุ่ม */
+
+  /* ===== หน้าหลังบ้าน (ผู้บริหาร) ===== */
+  --c-border-default: #E5E7EB;   /* สีเส้นขอบตอนเขียนแค่ `border` เฉยๆ */
+
+  /* ----- กราฟหน้าภาพรวม -----
+     สามสีนี้ผ่านเครื่องตรวจ palette ครบทุกข้อบนพื้นสีขาว (#FFFFFF):
+     ช่วงความสว่าง / ความสด / ระยะห่างสำหรับคนตาบอดสี / คอนทราสต์
+     คู่เขียว-แดงห่างกัน ΔE 8.6 (deutan) ซึ่งเป็นคู่ที่แยกยากที่สุดอยู่แล้ว
+     จึงมีทิศของแท่ง (ขึ้น = กำไร / ลง = ขาดทุน) เป็นตัวบอกซ้ำอีกชั้น */
+  --c-chart-revenue: #2a78d6;    /* เส้นยอดขาย */
+  --c-chart-profit: #15803D;     /* แท่งกำไร (ขึ้นเหนือเส้นคุ้มทุน) */
+  --c-chart-loss: #DC2626;       /* แท่งขาดทุน (ลงใต้เส้นคุ้มทุน) */
+  --c-chart-grid: #eceae5;       /* เส้นตาราง */
+  --c-chart-axis: #8a8880;       /* ตัวเลขบนแกน */
+  --c-chart-zero: #b8b4ab;       /* เส้นจุดคุ้มทุน */
+  --c-chart-cross: #c9c5bd;      /* เส้นตั้งตอนเอานิ้วลาก */
+
+
+  --c-admin-cta: #4A2C17;        /* ปุ่มหลักสีน้ำตาล (บันทึก / ส่งออก) */
+  --c-admin-cta-hover: #3A2212;
+  --c-admin-cta-ink: #FFFFFF;
+
+  --c-admin-card: #FFFFFF;       /* การ์ด/ตารางในหน้าหลังบ้าน */
+  --c-admin-panel: #F7F3EB;      /* กล่องฟอร์มสีครีม */
+  --c-admin-field: #FFFFFF;      /* พื้นช่องกรอก input/select */
+  --c-admin-line: #E5E5E5;       /* เส้นขอบการ์ด */
+  --c-admin-bar: #DCCFBA;        /* พื้นแถบแท็บ (ต้องเข้มกว่า --c-admin-tab พอให้เห็นแท็บที่เลือก) */
+  --c-admin-tab: #FFFFFF;        /* แท็บที่กำลังเลือกอยู่ */
+  --c-admin-tab-ink: #4A2C17;    /* ตัวอักษรแท็บที่เลือก */
+  --c-admin-tab-idle: #5F5044;   /* ตัวอักษรแท็บที่ไม่ได้เลือก */
+  --c-admin-tab-hover: #4A2C17;  /* ตอนเอาเมาส์ชี้แท็บที่ไม่ได้เลือก */
+
+  /* ----- สีรายรับ / รายจ่าย (ใช้ร่วมกันทุกหน้าในหลังบ้าน) -----
+     แก้ตรงนี้ที่เดียว เปลี่ยนทั้งหน้าภาพรวมและหน้าสรุปยอดพร้อมกัน
+
+     แต่ละสีมี 3 เฉด ใช้คนละที่กัน:
+     
+       ปกติ  = ตัวเลข/ตัวอักษรบนพื้นขาว  (ต้องเข้มพอให้อ่านออก)
+       -soft = พื้นป้ายสีอ่อนบนการ์ดหน้าภาพรวม
+       -ink  = ตัวอักษรที่วางบนพื้น -soft (ต้องเข้มกว่า -soft มาก)
+     ถ้าเปลี่ยนสี แนะนำให้ขยับทั้ง 3 เฉดไปทางเดียวกัน ไม่งั้นป้ายจะอ่านไม่ออก */
+  --c-admin-income: #15803D;        /* รายรับ */
+  --c-admin-income-soft: #00ec53;
+  --c-admin-income-ink: #166534;
+  --c-admin-expense: #DC2626;       /* รายจ่าย */
+  --c-admin-expense-soft: #FEE2E2;
+  --c-admin-expense-ink: #991B1B;
+}
+
+/* ---------- ธีมกลางคืน ----------
+   สีพื้นผิวไล่สว่างขึ้นทีละขั้นตามลำดับความใกล้ตา (พื้นแอป → การ์ด → ปุ่ม)
+   การ์ดเลยดูลอยขึ้นมาได้โดยไม่ต้องใช้เส้นขอบสว่าง ถ้าเปลี่ยนสีเอง
+   แนะนำให้รักษาลำดับนี้ไว้ ไม่งั้นการ์ดจะจมหายไปกับพื้นหลัง */
+.theme-night {
+  /* ===== 6 สีหลัก — แก้แค่กลุ่มนี้ก็เปลี่ยนอารมณ์ทั้งแอปแล้ว ===== */
+  --c-app: #301c03;          /* พื้นหลังแอป (ค่าตั้งต้นคือ #14100C) */
+  --c-strip: #1B1510;        /* แถบหัว + แถบล่าง */
+  --c-card: #241D16;         /* การ์ดเมนู */
+  --c-ink: #F6EEE4;          /* ตัวอักษรหลัก */
+  --c-accent: #E8B45C;       /* ราคา */
+  --c-cta: #E5A63F;          /* ปุ่มตะกร้าใหญ่ด้านล่าง */
+
+  /* ===== ตัวอักษร ===== */
+  --c-ink-2: #C9B8A6;        /* คำอธิบายใต้ชื่อเมนู */
+  --c-ink-3: #9B8875;        /* ตัวอักษรจางๆ เช่น footer */
+  --c-title: #F6EEE4;        /* ชื่อเมนู */
+  --c-heading: #E8B45C;      /* หัวข้อหมวดหมู่ */
+  --c-link: #E8B45C;         /* ลิงก์กดได้ */
+  --c-header-ink: #F6EEE4;   /* ตัวอักษรบนแถบหัว */
+
+  /* ===== พื้นผิวย่อย ===== */
+  --c-card-hover: #2E251C;   /* การ์ดเมนูตอนเอาเมาส์ชี้ */
+  --c-strip-soft: #1B1510;   /* แถบสถานะออเดอร์ */
+  --c-raised: #2E251C;       /* ปุ่มเล็กบนแถบหัว */
+  --c-raised-hover: #3B2E23;
+  --c-raised-ink: #E8B45C;   /* ตัวอักษร/ไอคอนในปุ่มเล็ก */
+  --c-logo: #2E251C;         /* กรอบโลโก้บนแถบหัว */
+  --c-well: #171209;         /* กรอบรูปอาหาร */
+  --c-well-2: #171209;
+
+  /* ===== เส้นขอบ ===== */
+  --c-line: #3B2E23;         /* เส้นขอบทั่วไป */
+  --c-line-strong: #4A3A2C;  /* เส้นขอบที่เข้มกว่า */
+
+  /* ===== ช่องกรอกข้อความ ===== (ดูคำอธิบายในบล็อก .theme-day) */
+  --c-field: #2E251C;        /* พื้นช่องกรอก */
+  --c-field-ink: #F6EEE4;    /* ตัวอักษรที่พิมพ์ลงไป */
+
+  /* ===== ปุ่ม ===== */
+  --c-cta-hover: #D2932C;    /* ปุ่มตะกร้าตอนชี้ */
+  --c-cta-ink: #1A120B;      /* ตัวอักษรในปุ่มตะกร้า */
+  --c-add: #E5A63F;          /* ปุ่มกลม + ท้ายรายการอาหาร */
+  --c-add-hover: #D2932C;
+  --c-add-ink: #1A120B;
+
+  /* ===== เฉดสีเทา (ใช้ทั่วหน้าพนักงาน + หลังบ้าน) =====
+     กลางคืนไล่เฉด "กลับทาง" กับกลางวัน: เลขน้อย = พื้นผิวเข้ม
+     เลขมาก = ตัวอักษรสว่าง ทำแบบนี้แล้วคลาสเดิมยังสื่อความหมายเดิมอยู่
+     (text-neutral-500 ยังเป็นตัวอักษรจางๆ, bg-neutral-100 ยังเป็นพื้นที่ยกขึ้นมา)
+     โดยไม่ต้องไปแก้ในไฟล์ jsx เลย
+
+     เฉดไล่ไปทางน้ำตาลอุ่นให้เข้ากับธีมกลางคืนฝั่งลูกค้า ไม่ใช่เทาล้วน
+     ข้อควรระวังเรื่องรูปแบบ R G B ดูที่บล็อก .theme-day */
+  --n-50: 27 21 16;          /* #1B1510 พื้นที่เข้มสุด */
+  --n-100: 36 29 22;         /* #241D16 การ์ด */
+  --n-150: 42 33 25;
+  --n-200: 59 46 35;         /* #3B2E23 เส้นขอบ */
+  --n-300: 74 58 44;         /* #4A3A2C เส้นขอบที่เข้มกว่า */
+  --n-400: 155 136 117;      /* #9B8875 ตัวอักษรจางสุด */
+  --n-500: 201 184 166;      /* #C9B8A6 คำอธิบาย */
+  --n-600: 217 203 187;
+  --n-700: 232 221 208;
+  --n-800: 246 238 228;      /* #F6EEE4 ตัวอักษรหลัก */
+  --n-900: 251 246 239;
+  --n-950: 255 255 255;
+
+  /* ===== ปุ่มทึบในหน้าพนักงาน/หลังบ้าน =====
+     กลางวันเป็นปุ่มดำตัวหนังสือขาว กลางคืนพลิกเป็นปุ่มเหลืองอำพัน
+     ตัวหนังสือเข้ม (ถ้าปล่อยให้ไล่ตามเฉดเทาที่กลับทาง ปุ่มจะกลายเป็น
+     พื้นขาวตัวหนังสือขาว = มองไม่เห็น) */
+  --c-ctl: #E5A63F;
+  --c-ctl-hover: #D2932C;
+  --c-ctl-ink: #1A120B;
+
+  /* ===== หน้าหลังบ้าน (ผู้บริหาร) ===== */
+  --c-border-default: #3B2E23;
+
+  /* ----- กราฟหน้าภาพรวม -----
+     เลือกใหม่สำหรับพื้นการ์ดสีเข้ม (#241D16) ไม่ใช่แค่เอาสีกลางวันมาทำให้สว่างขึ้น
+     ชุดเดิม (#6BA8E8/#4ADE80) สว่างเกินช่วงที่เครื่องตรวจยอมรับ
+     ชุดนี้ผ่านครบทุกข้อ คู่เขียว-แดงห่างกัน ΔE 6.2 (protan) ซึ่งอยู่ในเกณฑ์ที่
+     ใช้ได้เมื่อมีตัวบอกซ้ำ — ในที่นี้คือทิศของแท่งและคำว่ากำไร/ขาดทุนใน tooltip */
+  --c-chart-revenue: #3B82F6;
+  --c-chart-profit: #12803F;
+  --c-chart-loss: #DC3F3E;
+  --c-chart-grid: #3B2E23;
+  --c-chart-axis: #9B8875;
+  --c-chart-zero: #5A4737;
+  --c-chart-cross: #6B5443;
+
+
+  --c-admin-cta: #E5A63F;
+  --c-admin-cta-hover: #D2932C;
+  --c-admin-cta-ink: #1A120B;
+
+  --c-admin-card: #241D16;
+  --c-admin-panel: #1F1811;
+  --c-admin-field: #2E251C;
+  --c-admin-line: #3B2E23;
+  --c-admin-bar: #1B1510;
+  --c-admin-tab: #3B2E23;
+  --c-admin-tab-ink: #F6EEE4;
+  --c-admin-tab-idle: #9B8875;
+  --c-admin-tab-hover: #E8B45C;
+
+  /* ----- สีรายรับ / รายจ่าย ----- (ดูคำอธิบายในบล็อก .theme-day)
+     พื้นป้าย -soft ต้องเข้มลงให้เข้ากับการ์ดสีเข้ม และตัวอักษร -ink
+     ที่วางบนป้ายนั้นต้องกลับเป็นสีสว่าง ไม่งั้นอ่านไม่ออก */
+  --c-admin-income: #4ADE80;
+  --c-admin-income-soft: #14331F;
+  --c-admin-income-ink: #86EFAC;
+  --c-admin-expense: #F87171;
+  --c-admin-expense-soft: #3A1A18;
+  --c-admin-expense-ink: #FCA5A5;
+}
+
+/* ---------------------------------------------------------------------------
+   พื้นผิวสีขาวที่อยู่ในโหมดกลางคืน
+   ---------------------------------------------------------------------------
+   โหมดกลางคืนกลับด้าน neutral ramp (50 = เข้มสุด, 800 = สว่างสุด) เพื่อให้
+   `text-neutral-500` / `bg-neutral-100` ที่เขียนไว้ทั่วแอปสลับสีเองอัตโนมัติ
+   แต่แผงบางอันยังตั้งใจให้พื้นเป็นสีขาวจริงๆ (bottom sheet ของลูกค้า) พอ ramp
+   กลับด้าน ตัวอักษรในนั้นจึงกลายเป็นสีครีมบนพื้นขาว คือ contrast ประมาณ
+   1.06:1 — มองไม่เห็นเลย
+
+   แทนที่จะไล่ใส่ `dark:` ให้ทุก class ข้างใน เราคืนค่า ramp แบบกลางวันเฉพาะ
+   ตรงนี้ ตัวอักษรและพื้นผิวย่อยทั้งหมดที่อยู่ข้างในจึงกลับมาอ่านออกพร้อมกัน
+   และจุดที่เพิ่มเข้ามาทีหลังก็จะถูกต้องตั้งแต่แรกโดยไม่ต้องแก้ซ้ำ
+
+   ค่าตรงกับ .theme-day ทุกตัว
+   --------------------------------------------------------------------------- */
+.theme-night .surface-light {
+  --n-50: 250 250 250;
+  --n-100: 245 245 245;
+  --n-150: 240 240 240;
+  --n-200: 229 229 229;
+  --n-300: 212 212 212;
+  --n-400: 163 163 163;
+  --n-500: 115 115 115;
+  --n-600: 82 82 82;
+  --n-700: 64 64 64;
+  --n-800: 38 38 38;
+  --n-900: 23 23 23;
+  --n-950: 10 10 10;
+
+  /* แผงนี้พื้นขาวจริงๆ ช่องกรอกข้างในจึงต้องกลับไปเป็นขาว/ตัวหนังสือเข้ม
+     ไม่ใช่ช่องสีน้ำตาลเข้มของธีมกลางคืน */
+  --c-field: #FFFFFF;
+  --c-field-ink: #262626;
+}
+
+/* Cozy Day Theme */
+.theme-day {
+  background-color: #FDFBF7;
+  color: #1c1211;
+  background-image:
+      linear-gradient(90deg, rgba(162, 91, 52, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(162, 91, 52, 0.01) 8px, transparent 8px);
+  background-size: 20px 100%, 50px 100%;
+}
+
+/* Storefront surface: warm cream fading to peach, behind the day menu. */
+.surface-cozy {
+  background-color: var(--c-app);
+  background-image: linear-gradient(175deg, #FFFDFB 0%, #FFF4EA 45%, #FBE7D8 100%);
+}
+
+/* Horizontal wood grain for the app header, painted in CSS so it needs no
+   image asset and stays crisp at any width. */
+.wood-grain {
+  background-color: #25211e;
+  background-image:
+    linear-gradient(0deg, rgba(60, 30, 10, 0.32) 0%, transparent 22%, transparent 78%, rgba(60, 30, 10, 0.30) 100%),
+    repeating-linear-gradient(178deg,
+      rgba(255, 226, 190, 0.07) 0px,
+      rgba(255, 226, 190, 0.07) 1px,
+      transparent 1px,
+      transparent 5px),
+    repeating-linear-gradient(181deg,
+      rgba(74, 38, 14, 0.20) 0px,
+      rgba(74, 38, 14, 0.20) 2px,
+      transparent 2px,
+      transparent 11px),
+    linear-gradient(90deg, #7A4B27 0%, #9A6739 30%, #83552F 62%, #A06D3F 100%);
+}
+
+/* The page behind the app shell. Only the margins either side of the
+   max-w-md column show it, so it tracks --c-app rather than setting a
+   colour of its own. */
+.theme-night {
+  background-color: var(--c-app);
+  color: var(--c-ink);
+  background-image:
+      linear-gradient(90deg, rgba(232, 213, 196, 0.01) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(232, 213, 196, 0.005) 12px, transparent 12px);
+  background-size: 30px 100%, 70px 100%;
+}
+
+/* Custom scrollbar for web app */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0,0,0,0.05);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.25);
+  border-radius: 4px;
+}
+/* A black thumb on a near-black page is invisible; flip it for the night theme. */
+.theme-night ::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.04);
+}
+.theme-night ::-webkit-scrollbar-thumb {
+  background: rgba(246,238,228,0.22);
+}
+
+@keyframes slideup {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.animate-slide-up {
+  animation: slideup 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* แถบแจ้งเตือน "โต๊ะขอเช็กบิล" ที่หน้าพนักงาน — กะพริบช้าๆ ให้สังเกตเห็นแต่ยัง
+   อ่านออกตลอด (animate-pulse ของ Tailwind จางเกินไปจนตัวหนังสือหาย) */
+@keyframes pulse-slow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+.animate-pulse-slow {
+  animation: pulse-slow 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-slow {
+    animation: none;
+  }
+}
+
+/* --- Bill receipt slip (Xprinter XP-80T, 80mm thermal) --------------------
+   #bill-print is always in the DOM while a bill is printing, but it must never
+   show on screen — it lives off-canvas until the print media query pulls it
+   onto the page. Styled plain black-on-white (no colour/shadow) for a fast,
+   crisp monochrome thermal print; the auto-cutter cuts at the end of the page. */
+#bill-print {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 72mm;
+  color: #000;
+  background: #fff;
+  font-family: 'Sarabun', 'Noto Sans Thai', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+#bill-print .bp-center { text-align: center; }
+#bill-print .bp-shop { font-weight: 800; font-size: 21px; line-height: 1.15; }
+#bill-print .bp-doc { font-size: 13px; }
+/* Heavy "======" divider and light "------" divider. */
+#bill-print .bp-hr-eq { border-top: 3px double #000; height: 0; margin: 5px 0; }
+#bill-print .bp-hr-dash { border-top: 1px dashed #000; margin: 5px 0; }
+/* Two-column meta block: โต๊ะ/เวลา on the left, วันที่/พนักงาน on the right. */
+#bill-print .bp-meta { display: flex; justify-content: space-between; gap: 10px; }
+#bill-print .bp-meta > div { display: flex; flex-direction: column; }
+/* รายการ / Qty / ราคา — the same 3-column grid the item rows use. */
+#bill-print .bp-item { display: flex; align-items: baseline; }
+#bill-print .bp-head { font-weight: 700; }
+#bill-print .bp-name { flex: 1; padding-right: 4px; word-break: break-word; }
+#bill-print .bp-qty { width: 34px; text-align: center; flex-shrink: 0; }
+#bill-print .bp-amt { width: 66px; text-align: right; white-space: nowrap; flex-shrink: 0; }
+#bill-print .bp-sub-item .bp-name { padding-left: 4px; font-size: 12px; }
+#bill-print .bp-total-row { display: flex; justify-content: space-between; gap: 8px; font-weight: 800; font-size: 15px; }
+/* QR block: centred, with generous space above and below so the header text
+   and the footer text don't crowd the code.
+     margin: <บน> auto <ล่าง>  → เพิ่มเลขตัวแรก/ตัวท้ายเพื่อดันข้อความให้ห่างขึ้น */
+#bill-print .bp-qr { margin: 16px auto; text-align: center; }
+#bill-print .bp-qrhead { font-weight: 700; margin-bottom: 8px; }
+/* display:block + margin auto = การ์ด QR อยู่กึ่งกลางบิลพอดี */
+#bill-print .bp-qr svg { width: 42mm; height: 42mm; display: block; margin: 0 auto; }
+#bill-print .bp-foot { font-size: 12px; margin-top: 12px; }
+
+@media print {
+  /* Continuous 80mm roll, no page margins so the print starts at the paper
+     edge and the XP-80T cutter fires right after the slip. */
+  @page { size: 80mm auto; margin: 0; }
+
+  /* Print ONLY the slip. This used to hide the app with `visibility: hidden`,
+     which a desktop browser copes with but a phone does not: a hidden element
+     still OCCUPIES ITS SPACE, so the app's full height printed as blank pages
+     and the slip — a `position: fixed` box, which iOS/Android print engines
+     handle badly — came out empty or not at all. Printing and "save as PDF"
+     both looked broken on a phone and fine on a computer for this reason.
+
+     The slip is portalled to <body> (see StaffView) precisely so it can be
+     excluded here by id and everything else collapsed outright. */
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  body > *:not(#bill-print) { display: none !important; }
+
+  #bill-print {
+    /* An ordinary block in the page flow — no fixed positioning, nothing
+       off-canvas — which is what every print engine agrees on. */
+    display: block !important;
+    position: static !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    margin: 0 auto !important;
+    width: 76mm !important;
+    padding: 3mm 2mm 6mm !important;
+    box-shadow: none !important;
+  }
+}
+
+/* ===== ขนาดตัวอักษรของหน้าหลังบ้าน (พนักงาน/ผู้บริหาร) บนจอคอม =====
+   กรอบของสองหน้านี้ขยายได้ถึง ~1150px บนจอใหญ่ (ดู isBackOffice ใน App.jsx)
+   แต่คลาสขนาดตัวอักษรของ Tailwind เป็นหน่วย rem ที่อิงจาก <html> จึงไม่โต
+   ตามกรอบ ผลคือตัวหนังสือ 10-12px ลอยอยู่กลางจอ 27 นิ้ว
+
+   แทนที่จะไล่ใส่ `lg:text-*` ทีละจุดหลายร้อยแห่ง ที่นี่ทับค่าให้ทั้งชุดในที่
+   เดียว เฉพาะข้างใน .ui-desktop-scale (คือกรอบหลังบ้าน) และเฉพาะจอ >= 1024px
+   หน้าลูกค้ากับหน้า login ไม่มีคลาสนี้จึงไม่โดนแตะเลย
+
+   สเกลอยู่ที่ ~1.2 เท่า ปรับตัวเลขในบล็อกนี้ที่เดียวได้ทั้งระบบ
+   (ตัวเลือกมี specificity 0,2,0 จึงชนะคลาส Tailwind ปกติที่เป็น 0,1,0) */
+@media (min-width: 1024px) {
+  .ui-desktop-scale .text-\[9px\]    { font-size: 11px; }
+  .ui-desktop-scale .text-\[9\.5px\] { font-size: 11.5px; }
+  .ui-desktop-scale .text-\[10px\]   { font-size: 12px; }
+  .ui-desktop-scale .text-\[11px\]   { font-size: 13px; }
+  .ui-desktop-scale .text-xs         { font-size: 0.875rem; line-height: 1.35rem; }  /* 12 -> 14 */
+  .ui-desktop-scale .text-sm         { font-size: 1rem;     line-height: 1.5rem; }   /* 14 -> 16 */
+  .ui-desktop-scale .text-base       { font-size: 1.125rem; line-height: 1.65rem; }  /* 16 -> 18 */
+  .ui-desktop-scale .text-lg         { font-size: 1.25rem;  line-height: 1.8rem; }   /* 18 -> 20 */
+  .ui-desktop-scale .text-xl         { font-size: 1.375rem; line-height: 1.9rem; }   /* 20 -> 22 */
+}
