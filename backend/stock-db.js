@@ -64,27 +64,69 @@ export async function createStockItem({ category, name, quantity, imageUrl }) {
 // Deduct `qty` from the row whose name matches the dish (or restore it when
 // `qty` is negative — un-serving a mis-tap). Same LOWER(TRIM(...)) match as
 // createStockItem, so the dish↔stock link stays name-based end to end. Never
-// below 0. Returns the updated row, or null when no row matches — a dish with
-// no linked stock is simply a no-op.
-export async function consumeStockByName(name, qty) {
-  const { rows } = await getPool().query(
-    `UPDATE stock_items
-     SET quantity = GREATEST(0, quantity - $2)
-     WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
-     RETURNING id, category, name, quantity, image_url AS "imageUrl"`,
-    [name, qty]
-  );
-  return rows[0] || null;
+// below 0 — `quantityBefore` comes back alongside the row so the caller can log
+// what actually moved, not what was asked for. Returns { item, duplicate }:
+// `item` is null when no row matches (a dish with no linked stock is a no-op).
+//
+// `opKey` makes the cut safe to retry. A tablet that lost its connection mid-cut
+// cannot tell whether the server applied it, so it sends the same key again; the
+// key is recorded in the same transaction as the cut, so a key already on file
+// means the cut already happened and it is not applied twice (`duplicate`).
+export async function consumeStockByName(name, qty, opKey = null) {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    if (opKey) {
+      const { rowCount } = await client.query(
+        `INSERT INTO stock_ops (op_key) VALUES ($1) ON CONFLICT DO NOTHING`,
+        [opKey]
+      );
+      if (rowCount === 0) {
+        await client.query('ROLLBACK');
+        const { rows } = await client.query(
+          `SELECT id, category, name, quantity, image_url AS "imageUrl"
+           FROM stock_items WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))`,
+          [name]
+        );
+        return { item: rows[0] || null, duplicate: true };
+      }
+    }
+    const { rows } = await client.query(
+      `WITH old AS (
+         SELECT id, quantity FROM stock_items
+         WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+         FOR UPDATE
+       )
+       UPDATE stock_items s
+       SET quantity = GREATEST(0, s.quantity - $2)
+       FROM old
+       WHERE s.id = old.id
+       RETURNING s.id, s.category, s.name, s.quantity, s.image_url AS "imageUrl",
+                 old.quantity AS "quantityBefore"`,
+      [name, qty]
+    );
+    await client.query('COMMIT');
+    return { item: rows[0] || null, duplicate: false };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Add `delta` (may be negative) to one item's quantity, never dropping below 0.
-// Returns the updated row, or null if the id matched nothing.
+// Returns the updated row with `quantityBefore`, or null if the id matched
+// nothing.
 export async function adjustStockItem(id, delta) {
   const { rows } = await getPool().query(
-    `UPDATE stock_items
-     SET quantity = GREATEST(0, quantity + $2)
-     WHERE id = $1
-     RETURNING id, category, name, quantity, image_url AS "imageUrl"`,
+    `WITH old AS (SELECT id, quantity FROM stock_items WHERE id = $1 FOR UPDATE)
+     UPDATE stock_items s
+     SET quantity = GREATEST(0, s.quantity + $2)
+     FROM old
+     WHERE s.id = old.id
+     RETURNING s.id, s.category, s.name, s.quantity, s.image_url AS "imageUrl",
+               old.quantity AS "quantityBefore"`,
     [id, delta]
   );
   return rows[0] || null;
@@ -155,13 +197,22 @@ export async function deleteStockItem(id) {
 }
 
 // Bump every item by `delta` (the "เติมทั้งหมด" buttons). Returns how many rows
-// changed.
+// changed, and how many of those hit the 0 floor and so moved by less than
+// `delta` (only possible when `delta` is negative).
 export async function restockAll(delta) {
-  const { rowCount } = await getPool().query(
-    `UPDATE stock_items SET quantity = GREATEST(0, quantity + $1)`,
+  const { rows } = await getPool().query(
+    `WITH old AS (SELECT id, quantity FROM stock_items FOR UPDATE)
+     UPDATE stock_items s
+     SET quantity = GREATEST(0, s.quantity + $1)
+     FROM old
+     WHERE s.id = old.id
+     RETURNING s.quantity - old.quantity AS moved`,
     [delta]
   );
-  return rowCount;
+  return {
+    changed: rows.length,
+    clamped: rows.filter((r) => Number(r.moved) !== Number(delta)).length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +246,16 @@ export async function ensureStockHistoryTable() {
   await getPool().query(
     `CREATE INDEX IF NOT EXISTS stock_history_created_at_idx ON stock_history (created_at DESC)`
   );
+  // Keys of stock cuts already applied — see consumeStockByName. A retry only
+  // ever arrives within minutes (at most days, for a tablet left offline), so
+  // old keys are pruned on start-up.
+  await getPool().query(`
+    CREATE TABLE IF NOT EXISTS stock_ops (
+      op_key     TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+  await getPool().query(`DELETE FROM stock_ops WHERE created_at < now() - interval '30 days'`);
 }
 
 // Append one entry. `delta` is the signed change in on-hand count (+ added,
@@ -215,15 +276,22 @@ export async function logStockChange({
 }
 
 // Most recent movements first. `limit` is capped by the caller.
-export async function fetchStockHistory(limit = 200) {
+export async function fetchStockHistory(limit = 200, date = null) {
+  // `date` ('YYYY-MM-DD') narrows the log to one WORKING day: 06:00 that date →
+  // 06:00 the next, Bangkok time — the same day every other date in the app is
+  // keyed on (workdayKey in frontend/src/shift.js), so a movement at 01:00 lands
+  // on the night that made it. Omitted = the latest rows across all days.
   const { rows } = await getPool().query(
     `SELECT id, item_id AS "itemId", item_name AS "itemName", category, action,
             delta, quantity_after AS "quantityAfter", note,
             by_user AS "byUser", by_name AS "byName", created_at AS "createdAt"
      FROM stock_history
+     WHERE $2::date IS NULL
+        OR (created_at >= ($2::date + time '06:00') AT TIME ZONE 'Asia/Bangkok'
+            AND created_at < ($2::date + 1 + time '06:00') AT TIME ZONE 'Asia/Bangkok')
      ORDER BY created_at DESC, id DESC
      LIMIT $1`,
-    [limit]
+    [limit, date]
   );
   return rows;
 }

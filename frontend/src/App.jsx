@@ -4,7 +4,7 @@ import StaffView from './components/StaffView';
 import OwnerView from './components/OwnerView';
 import InventoryView from './components/InventoryView';
 import LoginPage from './components/LoginPage';
-import { fetchState, saveResource, subscribeToState, login, claimAccount, setAuthToken } from './api';
+import { fetchState, saveResource, saveOrdersDelta, subscribeToState, login, claimAccount, setAuthToken } from './api';
 import { shiftNow } from './shift';
 import { normalizeGroupStore } from './menu-groups';
 import {
@@ -165,6 +165,18 @@ function scanAnchor() {
   return readSeating()?.table ?? null;
 }
 
+// The bills in `next` that are new or differ from `prev`, matched by id — what
+// an orders save sends (see saveOrdersDelta). Updaters map over the array and
+// hand back untouched bills as the same object, so nearly every bill is skipped
+// on identity alone and only a copied one is compared as JSON.
+function changedBills(prev, next) {
+  const before = new Map((prev || []).map((o) => [o?.id, o]));
+  return (next || []).filter((o) => {
+    const old = before.get(o?.id);
+    return old !== o && JSON.stringify(old) !== JSON.stringify(o);
+  });
+}
+
 function App() {
   const [theme, setTheme] = useState(() => {
     // A customer arriving via a table QR is pinned to their shift from the very
@@ -216,9 +228,10 @@ function App() {
   const [orders, setOrdersLocal] = useState([]);
   // Owner-recorded outgoings. Empty until the backend answers.
   const [expenses, setExpensesLocal] = useState([]);
-  // Staff clock-in/out records. Server-owned: read-only here, appended to only
-  // via the /api/timeclock/clock endpoint (which then broadcasts over SSE).
-  const [timeclock, setTimeclockLocal] = useState([]);
+  // Days worked per staff member per month, keyed "user__YYYY-MM" -> number.
+  // Server-owned: typed in by the owner via /api/payroll/days (which then
+  // broadcasts over SSE), never written wholesale from here.
+  const [workdays, setWorkdaysLocal] = useState({});
   // Monthly payroll status keyed "user__YYYY-MM" -> 'paid'. Server-owned too.
   const [payroll, setPayrollLocal] = useState({});
   // Extras come from the sheet via the backend; fall back to the local
@@ -298,7 +311,8 @@ function App() {
   // the child components need no changes.
   const makeSetter = (resource, setLocal, ref) =>
     (updater) => {
-      const next = typeof updater === 'function' ? updater(ref.current) : updater;
+      const prev = ref.current;
+      const next = typeof updater === 'function' ? updater(prev) : updater;
       ref.current = next;
       setLocal(next);
       // Record what we sent, so the echo of our own write reads as "nothing
@@ -306,7 +320,13 @@ function App() {
       isNewPayload(resource, next);
       writesInFlight.current[resource] = (writesInFlight.current[resource] || 0) + 1;
       // A 401 means our staff session expired — drop it and ask to log in again.
-      saveResource(resource, next, handleSessionExpired).finally(() => {
+      // Any other failure is shown, never swallowed (handleSaveFailed).
+      // Orders send only the bills this change touched: the whole array holds
+      // every paid bill there has ever been, and outgrew the server's body limit.
+      const save = resource === 'orders'
+        ? saveOrdersDelta(changedBills(prev, next), handleSessionExpired, handleSaveFailed)
+        : saveResource(resource, next, handleSessionExpired, handleSaveFailed);
+      save.finally(() => {
         setTimeout(() => {
           writesInFlight.current[resource] = Math.max(0, (writesInFlight.current[resource] || 0) - 1);
           if (isWriting(resource) || !missedPush.current[resource]) return;
@@ -469,7 +489,7 @@ function App() {
   // real time. It re-runs whenever the logged-in user changes (login/logout) so
   // both the fetch and the stream carry the current session token, and the
   // server re-scopes what it returns (an owner then starts receiving the gated
-  // expenses/payroll/time-clock data; a logout drops back to the public slice).
+  // expenses/payroll/days-worked data; a logout drops back to the public slice).
   useEffect(() => {
     // Adopt one resource out of a pushed snapshot — but never one this tab is
     // still writing (that snapshot predates our own change), and never one that
@@ -497,7 +517,7 @@ function App() {
       adopt('choices', s.choices, setChoicesLocal, normalizeGroupStore);
       adopt('addonPresets', s.addonPresets, setAddonPresetsLocal);
       adopt('menuPresets', s.menuPresets, setMenuPresetsLocal);
-      adopt('timeclock', s.timeclock, setTimeclockLocal);
+      adopt('workdays', s.workdays, setWorkdaysLocal);
       adopt('payroll', s.payroll, setPayrollLocal);
     };
     // Reachable from the write path above, which re-reads the state after it has
@@ -553,11 +573,15 @@ function App() {
     }
   }, []);
 
-  const showToast = (message) => {
+  // Each toast restarts the timer, so an earlier toast's timeout can no longer
+  // hide a newer one early — which matters for the long-lived save-failure one.
+  const toastTimer = useRef(null);
+  const showToast = (message, duration = 2800) => {
     setToast({ show: true, message });
-    setTimeout(() => {
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => {
       setToast(prev => ({ ...prev, show: false }));
-    }, 2800);
+    }, duration);
   };
 
   // Land a signed-in session: route to the panel the server says this account
@@ -625,6 +649,15 @@ function App() {
     setAuthToken(null);
     showToast('เซสชันหมดอายุ กรุณาเข้าสู่ระบบอีกครั้ง');
     setRole('login');
+  };
+
+  // Called when a write did not land — the server refused it, or never answered
+  // (status 0). The screen already shows the change, so say plainly that it is
+  // NOT saved: other devices will not see it and a refresh will undo it. Kept up
+  // longer than an ordinary toast so it is not missed mid-service.
+  const handleSaveFailed = (status) => {
+    const why = status ? `HTTP ${status}` : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้';
+    showToast(`บันทึกไม่สำเร็จ ข้อมูลยังไม่ถูกบันทึก กรุณารีเฟรชหน้าแล้วลองใหม่ (${why})`, 8000);
   };
 
   const triggerPwa = () => {
@@ -874,7 +907,6 @@ function App() {
               addons={addons}
               choices={choices}
               addonPresets={addonPresets}
-              timeclock={timeclock}
             />
           )}
 
@@ -882,6 +914,8 @@ function App() {
           {loadState === 'ready' && role === 'inventory' && (
             <InventoryView
               menu={menu}
+              orders={orders}
+              menuPresets={menuPresets}
               addonPresets={addonPresets}
               setAddonPresets={setAddonPresets}
               showToast={showToast}
@@ -903,7 +937,7 @@ function App() {
               staff={staff}
               setStaff={setStaff}
               showToast={showToast}
-              timeclock={timeclock}
+              workdays={workdays}
               payroll={payroll}
               activeStaffUser={activeStaffUser}
             />

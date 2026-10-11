@@ -5,7 +5,6 @@ import {
   Wallet,
   LayoutDashboard,
   UtensilsCrossed,
-  CalendarClock,
   UserCog,
   Users,
   Package,
@@ -17,8 +16,9 @@ import OwnerMenu from './OwnerMenu';
 import OwnerBills from './OwnerBills';
 import StockPanel from './StockPanel';
 import TableQrCodes from './TableQrCodes';
-import { manualTimeclock, setPayrollStatus, updateStaffAccount, fetchStockHistory } from '../api';
-import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, fmtStockTime } from '../stock-history';
+import { setPayrollStatus, setWorkDays, updateStaffAccount } from '../api';
+import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, STOCK_HISTORY_DAY_LIMIT, fmtStockTime, useStockHistory } from '../stock-history';
+import StockHistoryDateBar from './StockHistoryDateBar';
 import { workdayKey } from '../shift';
 import {
   SHOPS,
@@ -53,11 +53,11 @@ function OwnerView({
   staff,
   setStaff,
   showToast,
-  timeclock,
+  workdays,
   payroll,
   activeStaffUser
 }) {
-  const [subTab, setSubTab] = useState('dashboard'); // dashboard, menu, stock, finance, timeclock, settings
+  const [subTab, setSubTab] = useState('dashboard'); // dashboard, menu, stock, finance, staff, settings
 
   // --- LEDGER ENTRY FORM (รายรับ / รายจ่าย) ---
   // Which side of the book the form is writing to. Defaults to รายจ่าย: takings
@@ -91,7 +91,7 @@ function OwnerView({
   // sends it back, so it is write-only from this screen onwards.
   const [newStaffPin, setNewStaffPin] = useState('');
   // ตำแหน่ง + ค่าแรงรายวัน + ร้านที่ประจำ ('day' | 'night') — owner-only info,
-  // shown nowhere outside this settings panel.
+  // shown nowhere outside the ข้อมูลพนักงาน tab.
   const [newStaffPosition, setNewStaffPosition] = useState('');
   const [newStaffWage, setNewStaffWage] = useState('');
   const [newStaffShop, setNewStaffShop] = useState('day');
@@ -99,17 +99,11 @@ function OwnerView({
   // this back office). Defaults to staff so owner access is always deliberate.
   const [newStaffRole, setNewStaffRole] = useState('staff');
 
-  // --- ประวัติเข้างาน (time clock history) ---
-  // Which month the summary table shows (YYYY-MM) and which day the in/out
-  // detail table shows (YYYY-MM-DD). Both default to the current WORKING day
-  // (06:00 → 06:00), which is how staff records are keyed — at 01:00 the owner
-  // must land on the shift still in progress, not on an empty new date.
+  // --- สรุปจำนวนวัน & เงินเดือน ---
+  // Which month the summary table shows (YYYY-MM). Defaults to the month of the
+  // current WORKING day (06:00 → 06:00), so at 01:00 on the 1st the owner still
+  // lands on the month whose last shift is in progress.
   const [tcMonth, setTcMonth] = useState(() => workdayKey().slice(0, 7));
-  const [tcDate, setTcDate] = useState(() => workdayKey());
-
-  // Backfill modal (admin logs a forgotten clock). null = closed.
-  const [backfill, setBackfill] = useState(null); // { user, date, inTime, outTime }
-  const [savingClock, setSavingClock] = useState(false);
 
   // Staff editor modal (ชื่อ / ชื่อผู้ใช้ / รหัสผ่าน / ค่าแรง). null = closed.
   // `original` is the username the account is stored under, kept separate from
@@ -137,47 +131,32 @@ function OwnerView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subTab]);
 
-  // --- ตารางที่ 3: ประวัติอัปเดตสต็อก ------------------------------------------
+  // --- ตารางที่ 2: ประวัติอัปเดตสต็อก ------------------------------------------
   // The stock_history audit trail (who moved what, when). It lives in PostgreSQL
   // rather than the shared app state, so it is fetched on demand instead of
   // arriving over SSE — hence its own loading/error pair and a refresh button.
-  const [stockHistory, setStockHistory] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState('');
-
-  const loadStockHistory = async () => {
-    setHistoryLoading(true);
-    setHistoryError('');
-    try {
-      setStockHistory(await fetchStockHistory(200));
-    } catch (err) {
-      setHistoryError(err.message || 'โหลดประวัติอัปเดตสต็อกไม่สำเร็จ');
-    } finally {
-      setHistoryLoading(false);
-    }
-  };
+  // One working day at a time, picked with the date bar above the table.
+  const {
+    items: stockHistory, loading: historyLoading, error: historyError,
+    date: historyDate, setDate: setHistoryDate, reload: loadStockHistory,
+  } = useStockHistory();
 
   // Load once the tab is actually opened, so the other four tabs cost nothing.
   useEffect(() => {
-    if (subTab === 'timeclock') loadStockHistory();
+    if (subTab === 'staff') loadStockHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subTab]);
 
-  // Days worked (and wages owed) per staff member in the chosen month. A day
-  // counts ONLY when it has BOTH a clock-in and a clock-out — hours don't
-  // matter (they're only for spotting a late arrival). Staff with no records
-  // still get a row showing 0.
+  // Days worked (and wages owed) per staff member in the chosen month. The days
+  // are typed in by the owner, one number per person per month; staff with
+  // nothing entered yet get a row showing 0.
   //
   // Owner accounts are left out: the เจ้าของร้าน IS the one paying, so a
   // "เงินเดือน / ยังไม่จ่าย" row against themselves is money owed to nobody —
-  // and marking it จ่ายแล้ว would file a wage into their own รายจ่าย. Their
-  // clock-ins still show in ตารางที่ 2, which is attendance, not payroll.
+  // and marking it จ่ายแล้ว would file a wage into their own รายจ่าย.
   const tcMonthlySummary = useMemo(() => {
-    const monthRecords = (timeclock || []).filter((r) => (r.date || '').startsWith(tcMonth));
     return (staff || []).filter((s) => s.role !== 'owner').map((s) => {
-      const days = new Set(
-        monthRecords.filter((r) => r.user === s.user && r.inAt && r.outAt).map((r) => r.date)
-      ).size;
+      const days = Number(workdays?.[`${s.user}__${tcMonth}`]) || 0;
       const paid = payroll?.[`${s.user}__${tcMonth}`] === 'paid';
       return {
         user: s.user, name: s.name, position: s.position,
@@ -187,27 +166,7 @@ function OwnerView({
         dailyWage: s.dailyWage || 0, days, salary: days * (s.dailyWage || 0), paid,
       };
     });
-  }, [timeclock, staff, tcMonth, payroll]);
-
-  // The chosen day flattened into ONE row per event (a clock-in and a clock-out
-  // are separate rows), sorted by the actual time — matching the daily ticket.
-  const tcDayEvents = useMemo(() => {
-    const events = [];
-    (timeclock || [])
-      .filter((r) => r.date === tcDate)
-      .forEach((r) => {
-        if (r.inAt) events.push({ id: r.id + '-in', at: r.inAt, name: r.name || r.user, kind: 'in' });
-        if (r.outAt) events.push({ id: r.id + '-out', at: r.outAt, name: r.name || r.user, kind: 'out' });
-      });
-    return events.sort((a, b) => a.at - b.at);
-  }, [timeclock, tcDate]);
-
-  const tcTime = (ts) =>
-    ts ? new Date(ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.' : '—';
-
-  // Combine the modal's date (YYYY-MM-DD) + a "HH:MM" time into epoch ms.
-  const combineDateTime = (date, time) =>
-    time ? new Date(`${date}T${time}:00`).getTime() : null;
+  }, [workdays, staff, tcMonth, payroll]);
 
   // --- เงินเดือนที่จ่ายแล้ว -> รายจ่าย ----------------------------------------
   // Marking a month "จ่ายแล้ว" files the wage in the expense book by itself: the
@@ -285,8 +244,23 @@ function OwnerView({
     }
   };
 
-  const openBackfill = () => {
-    setBackfill({ user: staff?.[0]?.user || '', date: tcDate, inTime: '', outTime: '' });
+  // Commit the จำนวนวัน box for one row. Runs on blur / Enter, and only when the
+  // number actually changed, so tabbing through the table sends nothing. A bad
+  // entry puts the stored figure back in the box instead of saving.
+  const handleSetDays = async (row, input) => {
+    const raw = input.value.trim();
+    const days = raw === '' ? 0 : Number(raw);
+    if (days === row.days) return;
+    if (!Number.isFinite(days) || days < 0 || days > 31) {
+      input.value = row.days || '';
+      return showToast('จำนวนวันต้องอยู่ระหว่าง 0–31');
+    }
+    try {
+      await setWorkDays({ user: row.user, month: tcMonth, days });
+    } catch (err) {
+      input.value = row.days || '';
+      showToast(err.message || 'บันทึกจำนวนวันไม่สำเร็จ');
+    }
   };
 
   // --- แก้ไขข้อมูลพนักงาน ------------------------------------------------------
@@ -354,7 +328,7 @@ function OwnerView({
         role: staffEdit.role,
       });
       // No local staff write: the server rewrites the account (and moves the
-      // person's attendance history if the username changed), then pushes the
+      // person's days-worked and payroll history if the username changed), then pushes the
       // new state to every open tab over SSE.
       showToast(
         `แก้ไขข้อมูล ${name || user} เรียบร้อย` +
@@ -367,29 +341,6 @@ function OwnerView({
       showToast(err.message || 'แก้ไขข้อมูลพนักงานไม่สำเร็จ');
     } finally {
       setSavingStaff(false);
-    }
-  };
-
-  const handleSaveBackfill = async () => {
-    if (!backfill?.user || !backfill?.date) return;
-    if (!backfill.inTime && !backfill.outTime) {
-      showToast('กรุณาระบุเวลาเข้าหรือออกอย่างน้อยหนึ่งช่อง');
-      return;
-    }
-    setSavingClock(true);
-    try {
-      await manualTimeclock({
-        user: backfill.user,
-        date: backfill.date,
-        inAt: combineDateTime(backfill.date, backfill.inTime),
-        outAt: combineDateTime(backfill.date, backfill.outTime),
-      });
-      showToast('บันทึกเวลาย้อนหลังเรียบร้อย');
-      setBackfill(null);
-    } catch (err) {
-      showToast(err.message || 'บันทึกเวลาย้อนหลังไม่สำเร็จ');
-    } finally {
-      setSavingClock(false);
     }
   };
 
@@ -709,302 +660,18 @@ function OwnerView({
           </div>
         );
 
-      case 'timeclock':
+      case 'staff':
         return (
           <div className="space-y-4 font-thai text-xs">
 
-            {/* ADMIN ACTIONS — backfill a forgotten clock, edit an account */}
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={openBackfill}
-                className="flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
-              >
-                <CalendarClock className="w-4 h-4 flex-shrink-0" />
-                <span>ลงเวลาย้อนหลัง</span>
-              </button>
-              <button
-                onClick={openStaffEdit}
-                className="flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
-              >
-                <UserCog className="w-4 h-4 flex-shrink-0" />
-                <span>แก้ไขข้อมูลพนักงาน</span>
-              </button>
-            </div>
-
-            {/* TABLE 1 — MONTHLY SUMMARY: days, wage/day, salary, paid status */}
-            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
-              <div className="flex justify-between items-center gap-2 flex-wrap">
-                <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตารางที่ 1: สรุปจำนวนวัน & เงินเดือน</h3>
-                <input
-                  type="month"
-                  value={tcMonth}
-                  onChange={(e) => setTcMonth(e.target.value)}
-                  className="border rounded-xl p-2 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
-                />
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-[10px] text-neutral-400 uppercase border-b border-neutral-100">
-                      <th className="text-left py-2 font-extrabold">ชื่อ</th>
-                      <th className="text-center py-2 font-extrabold">จำนวนวัน</th>
-                      <th className="text-right py-2 font-extrabold">ค่าแรง/วัน</th>
-                      <th className="text-right py-2 font-extrabold">เงินเดือน</th>
-                      <th className="text-center py-2 font-extrabold">สถานะ</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-neutral-100">
-                    {tcMonthlySummary.map((row) => (
-                      <tr key={row.user}>
-                        <td className="py-2.5">
-                          <span className="font-bold text-neutral-800 block">{row.name}</span>
-                          <span className="text-[10px] text-neutral-400">{row.position || row.user}</span>
-                        </td>
-                        <td className="py-2.5 text-center font-mono font-extrabold text-neutral-800">
-                          {row.days > 0 ? row.days : <span className="text-neutral-300">0</span>}
-                        </td>
-                        <td className="py-2.5 text-right font-mono text-neutral-500">
-                          {row.dailyWage > 0 ? row.dailyWage.toLocaleString() : <span className="text-neutral-300">—</span>}
-                        </td>
-                        <td className="py-2.5 text-right font-mono font-bold text-amber-700">
-                          {row.salary > 0 ? row.salary.toLocaleString() : <span className="text-neutral-300">—</span>}
-                        </td>
-                        <td className="py-2.5 text-center">
-                          <button
-                            onClick={() => handleTogglePaid(row)}
-                            className={`text-[10px] font-bold px-2.5 py-1 rounded-full transition ${
-                              row.paid
-                                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                                : 'bg-red-100 text-red-700 hover:bg-red-200'
-                            }`}
-                            title="แตะเพื่อสลับสถานะการจ่ายเงิน"
-                          >
-                            {row.paid ? 'จ่ายแล้ว ✓' : 'ยังไม่จ่าย'}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="text-[10px] text-neutral-400">* นับเป็น 1 วันเมื่อมีทั้งเวลาเข้าและออก (ชั่วโมงมีไว้เช็กเข้าสายเท่านั้น) — เงินเดือน = จำนวนวัน × ค่าแรง/วัน</p>
-            </div>
-
-            {/* TABLE 2 — DAILY IN/OUT LOG (one row per event, by time) */}
-            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
-              <div className="flex justify-between items-center gap-2 flex-wrap">
-                <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตารางที่ 2: ประวัติการเข้า-ออกรายวัน</h3>
-                <input
-                  type="date"
-                  value={tcDate}
-                  onChange={(e) => setTcDate(e.target.value)}
-                  className="border rounded-xl p-2 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
-                />
-              </div>
-
-              {tcDayEvents.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-[10px] text-neutral-400 uppercase border-b border-neutral-100">
-                        <th className="text-left py-2 font-extrabold">เวลา</th>
-                        <th className="text-left py-2 font-extrabold">ชื่อ</th>
-                        <th className="text-center py-2 font-extrabold">สถานะ (เข้า/ออก)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-neutral-100">
-                      {tcDayEvents.map((ev) => (
-                        <tr key={ev.id}>
-                          <td className="py-2.5 font-mono font-bold text-neutral-700">{tcTime(ev.at)}</td>
-                          <td className="py-2.5 font-bold text-neutral-800">{ev.name}</td>
-                          <td className="py-2.5 text-center">
-                            <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full ${ev.kind === 'in' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                              {ev.kind === 'in' ? 'เข้า' : 'ออก'}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="text-center py-8 text-neutral-400 font-medium">ไม่มีการลงเวลาในวันที่เลือก</div>
-              )}
-            </div>
-
-            {/* TABLE 3 — STOCK AUDIT TRAIL: every movement of คลังวัตถุดิบ, newest
-                first. The staff panel shows the same log as a popup; here it is a
-                table beside the attendance ones, because for the owner the two
-                answer one question together: who was on shift, and what did the
-                stock do while they were. */}
-            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
-              <div className="flex justify-between items-center gap-2 flex-wrap">
-                <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตารางที่ 3: ประวัติอัปเดตสต็อก</h3>
-                <button
-                  onClick={loadStockHistory}
-                  disabled={historyLoading}
-                  className="flex items-center gap-1.5 border rounded-xl px-3 py-2 bg-admin-field hover:bg-neutral-100 font-bold text-xs transition disabled:opacity-50"
-                  title="โหลดประวัติล่าสุดอีกครั้ง"
-                >
-                  <RotateCcw className={`w-3.5 h-3.5 ${historyLoading ? 'animate-spin' : ''}`} />
-                  <span>รีเฟรช</span>
-                </button>
-              </div>
-
-              {historyLoading && (
-                <div className="text-center py-8 text-neutral-400 font-medium">กำลังโหลดประวัติ…</div>
-              )}
-
-              {historyError && !historyLoading && (
-                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center justify-between gap-3">
-                  <span>{historyError}</span>
-                  <button onClick={loadStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
-                </div>
-              )}
-
-              {!historyLoading && !historyError && stockHistory.length === 0 && (
-                <div className="text-center py-8 text-neutral-400 font-medium">ยังไม่มีประวัติการอัปเดตสต็อก</div>
-              )}
-
-              {!historyLoading && !historyError && stockHistory.length > 0 && (
-                // Capped height with its own scroll: 200 rows would otherwise
-                // push everything above it off the top of a long page.
-                <div className="overflow-x-auto max-h-96 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-admin-card">
-                      <tr className="text-[10px] text-neutral-400 uppercase border-b border-neutral-100">
-                        <th className="text-left py-2 font-extrabold whitespace-nowrap">เวลา</th>
-                        <th className="text-left py-2 font-extrabold">รายการ</th>
-                        <th className="text-center py-2 font-extrabold whitespace-nowrap">ประเภท</th>
-                        <th className="text-right py-2 font-extrabold whitespace-nowrap">จำนวน</th>
-                        <th className="text-right py-2 font-extrabold whitespace-nowrap">คงเหลือ</th>
-                        <th className="text-left py-2 font-extrabold whitespace-nowrap">โดย</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-neutral-100">
-                      {stockHistory.map((h) => (
-                        <tr key={h.id}>
-                          <td className="py-2.5 pr-2 font-mono text-neutral-500 whitespace-nowrap">{fmtStockTime(h.createdAt)}</td>
-                          <td className="py-2.5 pr-2">
-                            {/* A 'restock-all' row is an aggregate with no item of
-                                its own, so it says so rather than showing a dash. */}
-                            <span className="font-bold text-neutral-800 block">
-                              {h.itemName || (h.action === 'restock-all' ? 'ทุกรายการในคลัง' : '—')}
-                            </span>
-                            {h.category && (
-                              <span className="text-[10px] text-neutral-400 font-medium block">{h.category}</span>
-                            )}
-                            {/* The reason typed when units were taken out. */}
-                            {h.note && (
-                              <span className="text-[10px] text-red-500 font-medium block">📝 {h.note}</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-1 text-center">
-                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap ${STOCK_ACTION_COLORS[h.action] || 'bg-neutral-100 text-neutral-600'}`}>
-                              {STOCK_ACTION_LABELS[h.action] || h.action}
-                            </span>
-                          </td>
-                          <td className="py-2.5 pl-2 text-right font-mono font-extrabold whitespace-nowrap">
-                            {h.delta === 0 ? (
-                              <span className="text-neutral-300">—</span>
-                            ) : (
-                              <span className={h.delta > 0 ? 'text-emerald-600' : 'text-red-500'}>
-                                {h.delta > 0 ? `+${h.delta}` : h.delta}
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-2.5 pl-2 text-right font-mono text-neutral-500">
-                            {h.quantityAfter != null ? h.quantityAfter : <span className="text-neutral-300">—</span>}
-                          </td>
-                          <td className="py-2.5 pl-2 font-bold text-neutral-700 whitespace-nowrap">
-                            {h.byName || h.byUser || 'ไม่ทราบ'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              <p className="text-[10px] text-neutral-400">* แสดง {stockHistory.length} รายการล่าสุด (สูงสุด 200) เรียงจากใหม่ไปเก่า — บันทึกอัตโนมัติทุกครั้งที่สต็อกขยับ รวมถึงตอนกดเสิร์ฟ</p>
-            </div>
-          </div>
-        );
-
-      case 'settings':
-        return (
-          <div className="space-y-4">
-            
-            {/* MAIN SETTINGS CONFIG */}
-            <form onSubmit={handleSaveSettings} className="bg-admin-card border rounded-2xl p-4 space-y-3.5 shadow-xs font-thai text-xs">
-              <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตั้งค่าระบบทั่วไป</h3>
-              
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">ชื่อร้านค้า (ฝั่งกลางวัน)</label>
-                <input
-                  type="text"
-                  value={settingsDraft.name}
-                  onChange={e => setSettingsDraft({ ...settingsDraft, name: e.target.value })}
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">ชื่อร้านค้า (ฝั่งกลางคืน)</label>
-                <input
-                  type="text"
-                  value={settingsDraft.nameNight || ''}
-                  onChange={e => setSettingsDraft({ ...settingsDraft, nameNight: e.target.value })}
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">จำนวนโต๊ะให้บริการทั้งหมด</label>
-                <input 
-                  type="number"
-                  min="1"
-                  max="100"
-                  value={settingsDraft.tables}
-                  onChange={e => setSettingsDraft({ ...settingsDraft, tables: Math.max(1, parseInt(e.target.value) || 1) })}
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono font-bold"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">URL หลักระบบของร้าน (สำหรับสร้าง QR Code)</label>
-                <input 
-                  type="text"
-                  value={settingsDraft.baseUrl}
-                  onChange={e => setSettingsDraft({ ...settingsDraft, baseUrl: e.target.value })}
-                  placeholder={window.location.origin + window.location.pathname}
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-[11px]"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-neutral-500 mb-1">เบอร์พร้อมเพย์ร้าน (สำหรับ QR รับชำระเงิน)</label>
-                <input
-                  type="text"
-                  value={settingsDraft.promptpayId || ''}
-                  onChange={e => setSettingsDraft({ ...settingsDraft, promptpayId: e.target.value })}
-                  placeholder="เบอร์มือถือ 10 หลัก หรือเลขบัตรประชาชน 13 หลัก"
-                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono"
-                />
-                <p className="text-[10px] text-neutral-400 mt-1">เว้นว่างไว้ = ปิดตัวเลือกจ่ายด้วย QR ตอนเช็คบิล</p>
-              </div>
-
-              <button 
-                type="submit"
-                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center"
-              >
-                บันทึกการตั้งค่าระบบ
-              </button>
-            </form>
+            {/* ADMIN ACTION — edit an existing account */}
+            <button
+              onClick={openStaffEdit}
+              className="w-full flex items-center justify-center gap-1.5 border-2 border-dashed border-neutral-300 hover:border-amber-500 hover:bg-amber-500/10 text-neutral-600 hover:text-amber-700 font-bold py-2.5 rounded-xl transition text-xs"
+            >
+              <UserCog className="w-4 h-4 flex-shrink-0" />
+              <span>แก้ไขข้อมูลพนักงาน</span>
+            </button>
 
             {/* STAFF CRUD ACCOUNTS MANAGEMENT */}
             <div className="bg-admin-card border rounded-2xl p-4 space-y-4 shadow-xs font-thai text-xs">
@@ -1167,6 +834,257 @@ function OwnerView({
               </form>
             </div>
 
+            {/* TABLE 1 — MONTHLY SUMMARY: days, wage/day, salary, paid status */}
+            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
+              <div className="flex justify-between items-center gap-2 flex-wrap">
+                <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตารางที่ 1: สรุปจำนวนวัน & เงินเดือน</h3>
+                <input
+                  type="month"
+                  value={tcMonth}
+                  onChange={(e) => setTcMonth(e.target.value)}
+                  className="border rounded-xl p-2 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
+                />
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[10px] text-neutral-400 uppercase border-b border-neutral-100">
+                      <th className="text-left py-2 font-extrabold">ชื่อ</th>
+                      <th className="text-center py-2 font-extrabold">จำนวนวัน</th>
+                      <th className="text-right py-2 font-extrabold">ค่าแรง/วัน</th>
+                      <th className="text-right py-2 font-extrabold">เงินเดือน</th>
+                      <th className="text-center py-2 font-extrabold">สถานะ</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {tcMonthlySummary.map((row) => (
+                      <tr key={row.user}>
+                        <td className="py-2.5">
+                          <span className="font-bold text-neutral-800 block">{row.name}</span>
+                          <span className="text-[10px] text-neutral-400">{row.position || row.user}</span>
+                        </td>
+                        <td className="py-2.5 text-center">
+                          {/* Keyed on the stored figure so a save (from this tab
+                              or another) resets the box to what the server holds.
+                              Locked once the month is จ่ายแล้ว: the wage is
+                              already filed in รายจ่าย at this number. */}
+                          <input
+                            key={`${row.user}__${tcMonth}__${row.days}`}
+                            type="number"
+                            min="0"
+                            max="31"
+                            step="0.5"
+                            inputMode="decimal"
+                            defaultValue={row.days || ''}
+                            placeholder="0"
+                            disabled={row.paid}
+                            onBlur={(e) => handleSetDays(row, e.target)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                            title={row.paid ? 'จ่ายแล้ว — เปลี่ยนเป็นยังไม่จ่ายก่อนแก้จำนวนวัน' : 'กรอกจำนวนวันที่มาทำงาน'}
+                            className="w-14 border rounded-lg p-1.5 bg-admin-field text-center font-mono font-extrabold text-neutral-800 focus:outline-none focus:ring-1 focus:ring-amber-500 disabled:opacity-60"
+                          />
+                        </td>
+                        <td className="py-2.5 text-right font-mono text-neutral-500">
+                          {row.dailyWage > 0 ? row.dailyWage.toLocaleString() : <span className="text-neutral-300">—</span>}
+                        </td>
+                        <td className="py-2.5 text-right font-mono font-bold text-amber-700">
+                          {row.salary > 0 ? row.salary.toLocaleString() : <span className="text-neutral-300">—</span>}
+                        </td>
+                        <td className="py-2.5 text-center">
+                          <button
+                            onClick={() => handleTogglePaid(row)}
+                            className={`text-[10px] font-bold px-2.5 py-1 rounded-full transition ${
+                              row.paid
+                                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                                : 'bg-red-100 text-red-700 hover:bg-red-200'
+                            }`}
+                            title="แตะเพื่อสลับสถานะการจ่ายเงิน"
+                          >
+                            {row.paid ? 'จ่ายแล้ว ✓' : 'ยังไม่จ่าย'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[10px] text-neutral-400">* กรอกจำนวนวันที่มาทำงานของแต่ละคนในเดือนนี้ — เงินเดือน = จำนวนวัน × ค่าแรง/วัน (แก้ไม่ได้เมื่อจ่ายแล้ว)</p>
+            </div>
+
+            {/* TABLE 2 — STOCK AUDIT TRAIL: every movement of คลังวัตถุดิบ, newest
+                first. The staff panel shows the same log as a popup; here it sits
+                beside the staff tables so the owner can see who moved what. */}
+            <div className="bg-admin-card border rounded-2xl p-4 space-y-3 shadow-xs">
+              <div className="flex justify-between items-center gap-2 flex-wrap">
+                <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตารางที่ 2: ประวัติอัปเดตสต็อก</h3>
+                <button
+                  onClick={loadStockHistory}
+                  disabled={historyLoading}
+                  className="flex items-center gap-1.5 border rounded-xl px-3 py-2 bg-admin-field hover:bg-neutral-100 font-bold text-xs transition disabled:opacity-50"
+                  title="โหลดประวัติล่าสุดอีกครั้ง"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 ${historyLoading ? 'animate-spin' : ''}`} />
+                  <span>รีเฟรช</span>
+                </button>
+              </div>
+
+              <StockHistoryDateBar date={historyDate} onChange={setHistoryDate} />
+
+              {historyLoading && (
+                <div className="text-center py-8 text-neutral-400 font-medium">กำลังโหลดประวัติ…</div>
+              )}
+
+              {historyError && !historyLoading && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center justify-between gap-3">
+                  <span>{historyError}</span>
+                  <button onClick={loadStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
+                </div>
+              )}
+
+              {!historyLoading && !historyError && stockHistory.length === 0 && (
+                <div className="text-center py-8 text-neutral-400 font-medium">ไม่มีการอัปเดตสต็อกในวันที่เลือก</div>
+              )}
+
+              {!historyLoading && !historyError && stockHistory.length > 0 && (
+                // Capped height with its own scroll: 200 rows would otherwise
+                // push everything above it off the top of a long page.
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-admin-card">
+                      <tr className="text-[10px] text-neutral-400 uppercase border-b border-neutral-100">
+                        <th className="text-left py-2 font-extrabold whitespace-nowrap">เวลา</th>
+                        <th className="text-left py-2 font-extrabold">รายการ</th>
+                        <th className="text-center py-2 font-extrabold whitespace-nowrap">ประเภท</th>
+                        <th className="text-right py-2 font-extrabold whitespace-nowrap">จำนวน</th>
+                        <th className="text-right py-2 font-extrabold whitespace-nowrap">คงเหลือ</th>
+                        <th className="text-left py-2 font-extrabold whitespace-nowrap">โดย</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-100">
+                      {stockHistory.map((h) => (
+                        <tr key={h.id}>
+                          <td className="py-2.5 pr-2 font-mono text-neutral-500 whitespace-nowrap">{fmtStockTime(h.createdAt)}</td>
+                          <td className="py-2.5 pr-2">
+                            {/* A 'restock-all' row is an aggregate with no item of
+                                its own, so it says so rather than showing a dash. */}
+                            <span className="font-bold text-neutral-800 block">
+                              {h.itemName || (h.action === 'restock-all' ? 'ทุกรายการในคลัง' : '—')}
+                            </span>
+                            {h.category && (
+                              <span className="text-[10px] text-neutral-400 font-medium block">{h.category}</span>
+                            )}
+                            {/* The reason typed when units were taken out. */}
+                            {h.note && (
+                              <span className="text-[10px] text-red-500 font-medium block">📝 {h.note}</span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-1 text-center">
+                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap ${STOCK_ACTION_COLORS[h.action] || 'bg-neutral-100 text-neutral-600'}`}>
+                              {STOCK_ACTION_LABELS[h.action] || h.action}
+                            </span>
+                          </td>
+                          <td className="py-2.5 pl-2 text-right font-mono font-extrabold whitespace-nowrap">
+                            {h.delta === 0 ? (
+                              <span className="text-neutral-300">—</span>
+                            ) : (
+                              <span className={h.delta > 0 ? 'text-emerald-600' : 'text-red-500'}>
+                                {h.delta > 0 ? `+${h.delta}` : h.delta}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 pl-2 text-right font-mono text-neutral-500">
+                            {h.quantityAfter != null ? h.quantityAfter : <span className="text-neutral-300">—</span>}
+                          </td>
+                          <td className="py-2.5 pl-2 font-bold text-neutral-700 whitespace-nowrap">
+                            {h.byName || h.byUser || 'ไม่ทราบ'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <p className="text-[10px] text-neutral-400">* แสดง {stockHistory.length} รายการของวันที่เลือก (06:00 ถึง 06:00 ของวันถัดไป{stockHistory.length >= STOCK_HISTORY_DAY_LIMIT ? `, สูงสุด ${STOCK_HISTORY_DAY_LIMIT} รายการล่าสุด` : ''}) เรียงจากใหม่ไปเก่า — บันทึกอัตโนมัติทุกครั้งที่สต็อกขยับ รวมถึงตอนกดเสิร์ฟ</p>
+            </div>
+          </div>
+        );
+
+      case 'settings':
+        return (
+          <div className="space-y-4">
+            
+            {/* MAIN SETTINGS CONFIG */}
+            <form onSubmit={handleSaveSettings} className="bg-admin-card border rounded-2xl p-4 space-y-3.5 shadow-xs font-thai text-xs">
+              <h3 className="font-kanit font-extrabold text-xs text-neutral-400 uppercase tracking-wider">ตั้งค่าระบบทั่วไป</h3>
+              
+              <div>
+                <label className="block font-bold text-neutral-500 mb-1">ชื่อร้านค้า (ฝั่งกลางวัน)</label>
+                <input
+                  type="text"
+                  value={settingsDraft.name}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, name: e.target.value })}
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-neutral-500 mb-1">ชื่อร้านค้า (ฝั่งกลางคืน)</label>
+                <input
+                  type="text"
+                  value={settingsDraft.nameNight || ''}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, nameNight: e.target.value })}
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-neutral-500 mb-1">จำนวนโต๊ะให้บริการทั้งหมด</label>
+                <input 
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={settingsDraft.tables}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, tables: Math.max(1, parseInt(e.target.value) || 1) })}
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-neutral-500 mb-1">URL หลักระบบของร้าน (สำหรับสร้าง QR Code)</label>
+                <input 
+                  type="text"
+                  value={settingsDraft.baseUrl}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, baseUrl: e.target.value })}
+                  placeholder={window.location.origin + window.location.pathname}
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-[11px]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-neutral-500 mb-1">เบอร์พร้อมเพย์ร้าน (สำหรับ QR รับชำระเงิน)</label>
+                <input
+                  type="text"
+                  value={settingsDraft.promptpayId || ''}
+                  onChange={e => setSettingsDraft({ ...settingsDraft, promptpayId: e.target.value })}
+                  placeholder="เบอร์มือถือ 10 หลัก หรือเลขบัตรประชาชน 13 หลัก"
+                  className="w-full border rounded-xl p-3 bg-admin-field focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono"
+                />
+                <p className="text-[10px] text-neutral-400 mt-1">เว้นว่างไว้ = ปิดตัวเลือกจ่ายด้วย QR ตอนเช็คบิล</p>
+              </div>
+
+              <button 
+                type="submit"
+                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-center"
+              >
+                บันทึกการตั้งค่าระบบ
+              </button>
+            </form>
+
             {/* TABLE QR CODES — printing table stickers is a setup job for the
                 owner; kept at the bottom of the settings page. */}
             <TableQrCodes settings={settings} />
@@ -1193,7 +1111,7 @@ function OwnerView({
           // การเงิน absorbed the old สรุปยอด tab — บันทึกรายจ่าย, สรุปยอดรายเดือน
           // and ประวัติรายรับ-รายจ่าย all live behind this one wallet icon now.
           { id: 'finance', label: 'การเงิน', icon: Wallet },
-          { id: 'timeclock', label: 'ข้อมูลพนักงาน', icon: Users },
+          { id: 'staff', label: 'ข้อมูลพนักงาน', icon: Users },
           { id: 'settings', label: 'ตั้งค่า', icon: SettingsIcon }
         ].map(tab => {
           const Icon = tab.icon;
@@ -1222,74 +1140,6 @@ function OwnerView({
 
       {/* RENDER VIEW AREA */}
       {renderActiveSubTab()}
-
-      {/* BACKFILL MODAL — admin logs a forgotten clock-in/out */}
-      {backfill && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => setBackfill(null)}>
-          <div className="bg-admin-card rounded-t-3xl sm:rounded-3xl max-w-md w-full p-6 space-y-4 text-neutral-800 max-h-[85vh] overflow-y-auto shadow-2xl border-t border-neutral-100 font-thai" onClick={(e) => e.stopPropagation()}>
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="text-base font-extrabold font-kanit">ลงเวลาย้อนหลัง</h3>
-                <span className="text-[10px] text-neutral-400 font-medium">สำหรับกรณีพนักงานลืมลงเวลาเข้า/ออก</span>
-              </div>
-              <button onClick={() => setBackfill(null)} className="p-1.5 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-500 transition">✕</button>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">พนักงาน</label>
-              <select
-                value={backfill.user}
-                onChange={(e) => setBackfill({ ...backfill, user: e.target.value })}
-                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
-              >
-                {(staff || []).map((s) => (
-                  <option key={s.user} value={s.user}>{s.name} ({s.user})</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-extrabold uppercase tracking-wider text-neutral-400 block">วันที่</label>
-              <input
-                type="date"
-                value={backfill.date}
-                onChange={(e) => setBackfill({ ...backfill, date: e.target.value })}
-                className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-xs"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600 block">เวลาเข้า</label>
-                <input
-                  type="time"
-                  value={backfill.inTime}
-                  onChange={(e) => setBackfill({ ...backfill, inTime: e.target.value })}
-                  className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold text-xs"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-extrabold uppercase tracking-wider text-amber-600 block">เวลาออก</label>
-                <input
-                  type="time"
-                  value={backfill.outTime}
-                  onChange={(e) => setBackfill({ ...backfill, outTime: e.target.value })}
-                  className="w-full border rounded-xl p-2.5 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono font-bold text-xs"
-                />
-              </div>
-            </div>
-            <p className="text-[10px] text-neutral-400">เว้นว่างช่องใดช่องหนึ่งได้ (เช่น ลงเฉพาะเวลาออกที่ลืม) — ถ้ามีบันทึกของวันนั้นอยู่แล้ว ระบบจะแก้ไขให้</p>
-
-            <button
-              onClick={handleSaveBackfill}
-              disabled={savingClock}
-              className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition text-sm disabled:opacity-50"
-            >
-              {savingClock ? 'กำลังบันทึก…' : 'บันทึกเวลา'}
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* STAFF EDIT MODAL — ชื่อ / ชื่อผู้ใช้ / รหัสผ่าน / ค่าแรง */}
       {staffEdit && (
@@ -1341,7 +1191,7 @@ function OwnerView({
               />
               {staffEdit.user.trim() !== staffEdit.original && (
                 <p className="text-[10px] text-amber-700 font-bold">
-                  เปลี่ยนชื่อผู้ใช้ — ประวัติการลงเวลาและสถานะจ่ายเงินเดือนจะย้ายตามไปด้วย
+                  เปลี่ยนชื่อผู้ใช้ — จำนวนวันทำงานและสถานะจ่ายเงินเดือนจะย้ายตามไปด้วย
                   แต่ต้องใช้ชื่อใหม่นี้ในการเข้าสู่ระบบครั้งต่อไป
                 </p>
               )}

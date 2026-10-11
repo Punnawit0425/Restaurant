@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { fetchStockItems, adjustStockItem, deleteStockItem, fetchStockHistory, resolveImageUrl } from '../api';
-import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, fmtStockTime } from '../stock-history';
+import { fetchStockItems, adjustStockItem, deleteStockItem, resolveImageUrl } from '../api';
+import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, STOCK_HISTORY_DAY_LIMIT, fmtStockTime, useStockHistory } from '../stock-history';
+import { workdayKey } from '../shift';
+import StockHistoryDateBar from './StockHistoryDateBar';
 import {
   Plus,
   Minus,
@@ -25,9 +27,10 @@ export default function StockPanel({ menu = [], showToast = () => {} }) {
 
   // ประวัติการบันทึกสต็อก panel (audit trail).
   const [showStockHistory, setShowStockHistory] = useState(false);
-  const [stockHistory, setStockHistory] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState('');
+  const {
+    items: stockHistory, loading: historyLoading, error: historyError,
+    date: historyDate, setDate: setHistoryDate, reload: reloadStockHistory,
+  } = useStockHistory();
 
   // Load the inventory from the database on mount.
   const loadStockItems = async () => {
@@ -141,18 +144,11 @@ export default function StockPanel({ menu = [], showToast = () => {} }) {
     }
   };
 
-  // Open the ประวัติ panel and pull the latest audit trail from the server.
-  const openStockHistory = async () => {
+  // Open the ประวัติ panel on the working day in progress; the date bar inside
+  // it steps back through earlier days.
+  const openStockHistory = () => {
     setShowStockHistory(true);
-    setHistoryLoading(true);
-    setHistoryError('');
-    try {
-      setStockHistory(await fetchStockHistory(200));
-    } catch (err) {
-      setHistoryError(err.message || 'โหลดประวัติการบันทึกสต็อกไม่สำเร็จ');
-    } finally {
-      setHistoryLoading(false);
-    }
+    setHistoryDate(workdayKey());
   };
 
   // Warn when an item drops to this many units or fewer (stock_items has
@@ -375,7 +371,7 @@ export default function StockPanel({ menu = [], showToast = () => {} }) {
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
-                  onClick={openStockHistory}
+                  onClick={reloadStockHistory}
                   className="p-2 rounded-lg hover:bg-neutral-100 text-neutral-500"
                   title="รีเฟรช"
                 >
@@ -391,6 +387,10 @@ export default function StockPanel({ menu = [], showToast = () => {} }) {
               </div>
             </div>
 
+            <div className="px-4 pt-3">
+              <StockHistoryDateBar date={historyDate} onChange={setHistoryDate} />
+            </div>
+
             <div className="overflow-y-auto p-4 space-y-2">
               {historyLoading && (
                 <div className="p-6 text-center text-xs text-neutral-400 font-thai">กำลังโหลดประวัติ…</div>
@@ -398,11 +398,14 @@ export default function StockPanel({ menu = [], showToast = () => {} }) {
               {historyError && !historyLoading && (
                 <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-xs font-thai flex items-center justify-between gap-3">
                   <span>{historyError}</span>
-                  <button onClick={openStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
+                  <button onClick={reloadStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
                 </div>
               )}
               {!historyLoading && !historyError && stockHistory.length === 0 && (
-                <div className="p-6 text-center text-xs text-neutral-400 font-thai">ยังไม่มีประวัติการบันทึกสต็อก</div>
+                <div className="p-6 text-center text-xs text-neutral-400 font-thai">ไม่มีการบันทึกสต็อกในวันที่เลือก</div>
+              )}
+              {!historyLoading && !historyError && stockHistory.length >= STOCK_HISTORY_DAY_LIMIT && (
+                <p className="text-[10px] text-neutral-400 text-center font-thai">แสดง {STOCK_HISTORY_DAY_LIMIT} รายการล่าสุดของวันที่เลือกเท่านั้น</p>
               )}
               {!historyLoading && !historyError && stockHistory.map((h) => (
                 <div key={h.id} className="flex items-start gap-3 p-3 bg-admin-field rounded-2xl text-xs font-thai">

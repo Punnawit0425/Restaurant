@@ -1,5 +1,9 @@
+import { useState, useRef, useCallback } from 'react';
+import { fetchStockHistory } from './api';
+import { workdayKey } from './shift';
+
 // How a stock_history row is presented. Shared by the staff คลังวัตถุดิบ
-// ประวัติ panel and the owner's "ตารางที่ 3: ประวัติอัปเดตสต็อก", so the two
+// ประวัติ panel and the owner's "ตารางที่ 2: ประวัติอัปเดตสต็อก", so the two
 // can never label the same movement differently.
 //
 // The action values come from the server (see schema/stock_history_schema.sql).
@@ -30,3 +34,48 @@ export const fmtStockTime = (iso) => {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   });
 };
+
+// --- Loading the log ---------------------------------------------------------
+// The one loader behind all three views of this log (the owner's table, the
+// คลัง ประวัติ popup, the staff popup), so they page through days the same way.
+//
+// The log is kept per WORKING day (06:00 → 06:00): `date` is the day on screen,
+// opening on the one in progress. Changing it fetches that day at once. Capped
+// at the server's maximum per request; a view says so when a day reaches it.
+export const STOCK_HISTORY_DAY_LIMIT = 500;
+
+export function useStockHistory() {
+  const [date, setDateState] = useState(() => workdayKey());
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  // Only the newest request may write: flicking through dates fires several,
+  // and an older day answering last must not land under the newer day's label.
+  const latest = useRef(0);
+
+  const load = useCallback(async (day) => {
+    const n = ++latest.current;
+    setLoading(true);
+    setError('');
+    try {
+      const rows = await fetchStockHistory(STOCK_HISTORY_DAY_LIMIT, day);
+      if (n === latest.current) setItems(rows);
+    } catch (err) {
+      if (n === latest.current) setError(err.message || 'โหลดประวัติการบันทึกสต็อกไม่สำเร็จ');
+    } finally {
+      if (n === latest.current) setLoading(false);
+    }
+  }, []);
+
+  // Show another day (and fetch it). An empty value — a cleared date box —
+  // goes back to the day in progress.
+  const setDate = useCallback((day) => {
+    const next = day || workdayKey();
+    setDateState(next);
+    load(next);
+  }, [load]);
+
+  const reload = useCallback(() => load(date), [load, date]);
+
+  return { items, loading, error, date, setDate, reload };
+}

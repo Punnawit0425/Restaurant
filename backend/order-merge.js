@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // Reconciling order writes — why a table's newest round used to vanish
 // ---------------------------------------------------------------------------
-// Every tab writes `orders` by PUTting the WHOLE array it currently holds. A
+// Every tab writes `orders` by sending whole bills from its own copy — once the
+// WHOLE array via PUT, now just the bills a change touched (PATCH). A
 // table that orders again does not get a new bill: mergeOrder folds the new
 // round into the open bill, keeping its id. So when โต๊ะ 5 orders round 2 while
 // a staff tablet is still holding the round-1 copy (asleep, SSE dropped, or a
@@ -46,7 +47,7 @@ function roundKeysOf(order) {
 // Same roll-up as deriveBillStatus in frontend/src/orders.js ('received' and
 // 'in_kitchen' both read as not-yet-started, so which of the two a legacy 'new'
 // line would normalise to does not matter here).
-function deriveBillStatus(items) {
+export function deriveBillStatus(items) {
   const list = items || [];
   if (list.length === 0) return 'new';
   const states = list.map((it) => (it?.status === 'cooking' ? 'in_progress' : it?.status || 'new'));
@@ -151,19 +152,25 @@ function reconcileStaffBill(stored, incoming) {
 // the base — which keeps staff's item statuses, edits and table moves from being
 // reverted by a phone holding an older copy — and only those two changes are
 // taken from the phone.
-export function reconcileCustomerBill(stored, incoming) {
+//
+// `cleanLine` rebuilds each added line from the menu (see customer-orders.js),
+// so the new round carries the server's prices, not the phone's; it throws to
+// refuse the write. `cleanCheckout` likewise reduces the เช็กบิล stamp to the
+// fields a diner may set, or null.
+export function reconcileCustomerBill(stored, incoming, cleanLine = (it) => it, cleanCheckout = (c) => c) {
   const known = new Set(roundKeysOf(stored));
-  const added = (incoming.items || []).filter(
-    (it) => !isDiscountItem(it) && it?.roundAt != null && !known.has(it.roundAt)
-  );
+  const added = (incoming.items || [])
+    .filter((it) => !isDiscountItem(it) && it?.roundAt != null && !known.has(it.roundAt))
+    .map(cleanLine);
 
   let next = stored;
   if (added.length) {
     next = appendRounds(stored, added, incoming);
     console.log(`[orders] Bill ${stored.id} (โต๊ะ ${stored.table}) took a new round of ${added.length} line(s)`);
   }
-  if (!stored.checkout && incoming.checkout?.stage === 'requested') {
-    next = { ...next, checkout: incoming.checkout };
+  const checkout = stored.checkout ? null : cleanCheckout(incoming.checkout);
+  if (checkout?.stage === 'requested') {
+    next = { ...next, checkout };
   }
   return withRoundKeys(next);
 }

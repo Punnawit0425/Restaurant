@@ -71,7 +71,7 @@ export async function claimAccount(user, pass) {
 
 // Fetch the shared state once (used on first load). Sends the session token when
 // there is one, so an owner/staff receives the fields the server gates behind a
-// login (expenses / payroll / time clock / staff HR); a customer gets the public
+// login (expenses / payroll / staff HR); a customer gets the public
 // slice.
 export async function fetchState() {
   const headers = {};
@@ -81,26 +81,50 @@ export async function fetchState() {
   return res.json();
 }
 
-// Replace one resource on the backend. The backend then broadcasts the new
-// state to every connected tab over SSE. Fire-and-forget: the UI already
-// updated optimistically, so we only log network failures. Protected resources
-// (menu / stock / staff / settings) need a valid session token — `onAuthError`
-// is called if the server rejects the write as unauthenticated.
-export function saveResource(resource, value, onAuthError) {
+// Send one shared-state write. The UI has already updated optimistically, so
+// the promise never rejects — but a write that did not land must never pass
+// quietly either. It used to: only a 401 was looked at, so when orders outgrew
+// the body limit every save came back 413 and the screen went on showing
+// changes that nobody else would ever see.
+//   * 401 — our staff session expired: `onAuthError()`.
+//   * any other non-OK reply: `onFailed(status)`.
+//   * no reply at all (offline, server down): `onFailed(0)`.
+function sendWrite(method, url, value, onAuthError, onFailed) {
   const headers = { 'Content-Type': 'application/json' };
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
-  return fetch(`/api/${resource}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(value),
-  })
+  const failed = (status) => {
+    if (typeof onFailed === 'function') onFailed(status);
+  };
+  return fetch(url, { method, headers, body: JSON.stringify(value) })
     .then((res) => {
       if (res.status === 401 && typeof onAuthError === 'function') onAuthError();
+      else if (!res.ok) {
+        console.error(`[api] ${method} ${url} was refused (HTTP ${res.status})`);
+        failed(res.status);
+      }
       return res;
     })
     .catch((err) => {
-      console.error(`[api] Could not save "${resource}" to backend:`, err);
+      console.error(`[api] ${method} ${url} did not reach the backend:`, err);
+      failed(0);
     });
+}
+
+// Replace one resource on the backend. The backend then broadcasts the new
+// state to every connected tab over SSE. Protected resources (menu / stock /
+// staff / settings) need a valid session token. See sendWrite for the two
+// callbacks.
+export function saveResource(resource, value, onAuthError, onFailed) {
+  return sendWrite('PUT', `/api/${resource}`, value, onAuthError, onFailed);
+}
+
+// Save only the bills that changed (new ones included). Orders are not written
+// with saveResource: the array carries every paid bill ever, and PUTting all of
+// it on each tap outgrew the server's body limit. The server rebuilds the full
+// array from its own copy (PATCH /api/orders). Nothing changed ⇒ nothing sent.
+export function saveOrdersDelta(changed, onAuthError, onFailed) {
+  if (!changed.length) return Promise.resolve();
+  return sendWrite('PATCH', '/api/orders', { changed }, onAuthError, onFailed);
 }
 
 // --- Menu management (owner) ------------------------------------------------
@@ -122,7 +146,11 @@ async function authedJson(url, options = {}) {
     // that has expired into a redirect — so the status code goes into the
     // toast. Without it every one of those reads as the same "ทำรายการไม่สำเร็จ"
     // and there is nothing to tell them apart by.
-    throw new Error(data.error || `ทำรายการไม่สำเร็จ (HTTP ${res.status})`);
+    const err = new Error(data.error || `ทำรายการไม่สำเร็จ (HTTP ${res.status})`);
+    // Kept so a caller can tell a refusal (4xx — retrying won't help) from a
+    // failure worth retrying. A network error never gets here: fetch throws.
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -262,12 +290,13 @@ export async function createStockItem({ category, name, quantity, imageUrl }) {
 
 // Deduct qty from the stock row matching a dish name (negative qty restores).
 // Fired when staff mark a dish เสิร์ฟแล้ว. Returns the updated row, or null if
-// no stock row carries that name (the dish just isn't stock-linked).
-export async function consumeStockByName(name, qty) {
+// no stock row carries that name (the dish just isn't stock-linked). `opKey`
+// identifies this one cut so a retry of it is never applied twice.
+export async function consumeStockByName(name, qty, opKey) {
   const { item } = await authedJson('/api/stock-items/consume', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, qty }),
+    body: JSON.stringify({ name, qty, opKey }),
   });
   return item;
 }
@@ -275,8 +304,12 @@ export async function consumeStockByName(name, qty) {
 // The stock audit trail (ประวัติการบันทึกสต็อก) — who changed what, newest
 // first. Returns [{ id, itemName, category, action, delta, quantityAfter,
 // byUser, byName, createdAt }].
-export async function fetchStockHistory(limit = 200) {
-  const { items } = await authedJson(`/api/stock-history?limit=${encodeURIComponent(limit)}`);
+// `date` ('YYYY-MM-DD', a working day) narrows it to that day; omit for the
+// latest rows across every day.
+export async function fetchStockHistory(limit = 200, date) {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (date) q.set('date', date);
+  const { items } = await authedJson(`/api/stock-history?${q}`);
   return items;
 }
 
@@ -290,36 +323,23 @@ export async function restockAllStock(delta) {
   return changed;
 }
 
-// --- Time clock (ลงเวลาเข้า-ออกงาน) -----------------------------------------
-// Clock in/out from anywhere — the session says who, the server stamps its own
-// clock for when. First call today = clock-in, second = clock-out.
-// Returns { action: 'in' | 'out', record }.
-export async function clockTime() {
-  const { action, record } = await authedJson('/api/timeclock/clock', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  return { action, record };
-}
-
-// Owner backfill: create/correct a staff member's in-out for one day. `inAt`/
-// `outAt` are epoch ms (outAt may be null). Staff session required.
-export async function manualTimeclock({ user, date, inAt, outAt }) {
-  const { record } = await authedJson('/api/timeclock/manual', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user, date, inAt, outAt }),
-  });
-  return record;
-}
-
+// --- Payroll (สรุปจำนวนวัน & เงินเดือน) ----------------------------------------
 // Owner sets one staff member's monthly payroll status ('paid' | 'unpaid').
 export async function setPayrollStatus({ user, month, status }) {
-  await authedJson('/api/timeclock/payroll', {
+  await authedJson('/api/payroll/status', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user, month, status }),
+  });
+}
+
+// Owner records how many days one staff member worked in a month (YYYY-MM).
+// The salary is derived from it (days × ค่าแรง/วัน) in OwnerView.
+export async function setWorkDays({ user, month, days }) {
+  await authedJson('/api/payroll/days', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user, month, days }),
   });
 }
 
@@ -343,7 +363,7 @@ export async function verifyStaffPin(pin) {
 // `pass`/`pin` means "leave that one alone".
 //
 // Not done by writing the whole staff array: renaming someone has to move their
-// time-clock and payroll history onto the new username, which only the server
+// days-worked and payroll history onto the new username, which only the server
 // can do. Returns the account as it now stands.
 export function updateStaffAccount(user, patch) {
   return authedJson(`/api/staff/${encodeURIComponent(user)}`, {

@@ -1,27 +1,19 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Wallet, Coins, Banknote, Landmark, Smartphone, Pencil } from 'lucide-react';
+import React, { useState, useMemo, useRef } from 'react';
+import { TrendingUp, TrendingDown, Wallet, Coins, Banknote, Landmark, Smartphone } from 'lucide-react';
 import { formatThaiDate, formatThaiDateWithWeekday, THAI_MONTHS_FULL } from '../expenses';
 import { workdayKey } from '../shift';
-import MenuPresetManager from './MenuPresetManager';
+import MenuStatsCard from './MenuStatsCard';
+import { monthLabel, baht, SHIFT_TABS } from '../dashboard-format';
 import {
   dayTotals,
   dayTakingsByMethod,
   dailySeries,
   monthlySeries,
-  menuStats,
-  presetDishNames,
   percentChange,
   summaryRows,
   summaryTotals,
   availableMonths
 } from '../stats';
-
-// 'YYYY-MM' -> 'กรกฎาคม 2569'
-function monthLabel(key) {
-  const [y, m] = (key || '').split('-').map(Number);
-  if (!y || !m) return key || '';
-  return `${THAI_MONTHS_FULL[m - 1]} ${y + 543}`;
-}
 
 // The chart's three marks. Sales and profit are both in baht, so they share ONE
 // y-axis — never a second scale.
@@ -41,43 +33,11 @@ const C_REVENUE = 'var(--c-chart-revenue)';
 const C_PROFIT = 'var(--c-chart-profit)';
 const C_LOSS = 'var(--c-chart-loss)';
 
-const SHIFT_TABS = [
-  { id: 'all', label: 'ทั้งหมด' },
-  { id: 'day', label: 'กลางวัน' },
-  { id: 'night', label: 'กลางคืน' }
-];
-
 const RANGES = [
   { id: 'week', label: 'สัปดาห์' },
   { id: 'month', label: 'เดือน' },
   { id: 'year', label: 'ปี' }
 ];
-
-const GROUPS = [
-  { id: 'all', label: 'ทั้งหมด' },
-  { id: 'food', label: 'อาหาร' },
-  { id: 'drink', label: 'น้ำ' },
-  // เฉพาะเมนู is not a third kind of dish — it is "only the ones in this group",
-  // and it brings its own preset dropdown with it.
-  { id: 'preset', label: 'เฉพาะเมนู' }
-];
-
-// Which slice of time สถิติเมนู counts. Opens on รายวัน / today, because the
-// question this table is usually opened to answer is "วันนี้ขายอะไรไปบ้าง".
-const STAT_PERIODS = [
-  { id: 'day', label: 'รายวัน' },
-  { id: 'month', label: 'รายเดือน' },
-  { id: 'year', label: 'รายปี' }
-];
-
-// How many dishes the stats table shows at once. A year of trade is a couple of
-// hundred rows, and a table that long is scrolled past rather than read.
-const STAT_PAGE_SIZE = 20;
-
-// `|| 0` is not redundant: rounding a tiny negative — or landing on JavaScript's
-// negative zero, which Math.ceil(-0.1) * step produces for the axis tick at
-// break-even — formats as the string "-0".
-const baht = (n) => (Math.round(n) || 0).toLocaleString();
 
 // A round gridline interval (1 / 2 / 2.5 / 5 × 10^n) at or above `raw`, so the
 // axis labels are numbers a person would actually write down.
@@ -416,27 +376,9 @@ export function TrendChart({ points, range }) {
 function OwnerDashboard({ orders, expenses, menu, menuPresets, setMenuPresets, showToast }) {
   const [shift, setShift] = useState('all');
   const [range, setRange] = useState('month');
-  const [group, setGroup] = useState('all');
-  const [sortBy, setSortBy] = useState('qty');
 
-  // --- สถิติเมนู scope ------------------------------------------------------
-  // Its own period, independent of the trend chart's สัปดาห์/เดือน/ปี above: one
-  // is "how is the shop doing over time", the other is "what sold on this day".
-  const [statPeriod, setStatPeriod] = useState('day'); // day | month | year
-  const [statDay, setStatDay] = useState(() => workdayKey());
-  const [statMonth, setStatMonth] = useState(() => workdayKey().slice(0, 7));
-  const [statYear, setStatYear] = useState(() => workdayKey().slice(0, 4));
-  // Which page of the table is showing, 0-based. Reset by the effect below
-  // whenever the filters change — page 3 of the old list is a page nobody asked
-  // for once the question changed.
-  const [page, setPage] = useState(0);
-  // Which saved กลุ่มเมนู the เฉพาะเมนู tab is showing, and whether the editor
-  // panel is open. '' = none picked yet, which is what the dropdown opens on.
-  const [presetId, setPresetId] = useState('');
-  const [showPresets, setShowPresets] = useState(false);
-
-  // The WORKING day, so "วันนี้" here means the same stretch of time the staff
-  // are clocked in for: 06:00 today → 06:00 tomorrow. The night side's bills
+  // The WORKING day, so "วันนี้" here means the same stretch of time the shop
+  // trades in: 06:00 today → 06:00 tomorrow. The night side's bills
   // therefore stay on tonight's total after midnight, and the KPI row resets at
   // 06:00 rather than while the bar is still open.
   const today = workdayKey();
@@ -482,74 +424,9 @@ function OwnerDashboard({ orders, expenses, menu, menuPresets, setMenuPresets, s
     return monthlySeries(orders, expenses, shift, 12);
   }, [orders, expenses, shift, range]);
 
-  // Every 'YYYY-MM' with trade in it, newest first, plus the current month. Two
-  // dropdowns read it: สรุปยอดรายเดือน below, and สถิติเมนู in รายเดือน mode.
+  // Every 'YYYY-MM' with trade in it, newest first, plus the current month, for
+  // the สรุปยอดรายเดือน dropdown below.
   const summaryMonths = useMemo(() => availableMonths(orders, expenses), [orders, expenses]);
-
-  // The saved กลุ่มเมนู, and the one currently selected. A preset whose dishes
-  // have all been deleted resolves to an empty name set — an honestly empty
-  // table, not a silent fall back to every dish.
-  const presetList = Array.isArray(menuPresets) ? menuPresets : [];
-  const activePreset = presetList.find((p) => p.id === presetId) || null;
-  const presetNames = useMemo(
-    () => (activePreset ? presetDishNames(menu, activePreset.menuIds) : null),
-    [menu, activePreset]
-  );
-
-  // The months the stats dropdown offers, newest first. Shared with the month
-  // summary block above (availableMonths already folds in the current month, so
-  // a fresh month is always selectable). A month that scrolls out of the list —
-  // data cleared — falls back to the newest rather than pointing at nothing.
-  const statMonthKey = summaryMonths.includes(statMonth)
-    ? statMonth
-    : (summaryMonths[0] || today.slice(0, 7));
-
-  // The years those months fall in, newest first. Derived rather than counted
-  // from a fixed range, so the dropdown never offers a year the shop did not
-  // trade in — and always offers this one, since availableMonths carries it.
-  const statYears = useMemo(
-    () => [...new Set(summaryMonths.map((m) => m.slice(0, 4)))].sort().reverse(),
-    [summaryMonths]
-  );
-  const statYearKey = statYears.includes(statYear) ? statYear : (statYears[0] || today.slice(0, 4));
-
-  // 'YYYY-MM-DD' | 'YYYY-MM' | 'YYYY' — all three are prefixes of a day key, so
-  // menuStats needs no third code path to count a whole year.
-  const statKey =
-    statPeriod === 'day' ? statDay : statPeriod === 'year' ? statYearKey : statMonthKey;
-  // เฉพาะเมนู with nothing chosen yet has no question to answer, so it asks for
-  // a preset instead of quietly showing the unfiltered table.
-  const awaitingPreset = group === 'preset' && !activePreset;
-  const rows = useMemo(() => {
-    if (awaitingPreset) return [];
-    return menuStats(orders, menu, {
-      shift,
-      // เฉพาะเมนู is a dish filter, not a food/drink one — the group stays 'all'
-      // and the preset's names do the narrowing.
-      group: group === 'preset' ? 'all' : group,
-      sortBy,
-      periodKey: statKey,
-      names: group === 'preset' ? presetNames : undefined
-    });
-  }, [orders, menu, shift, group, sortBy, statKey, presetNames, awaitingPreset]);
-
-  // --- Paging the stats table ----------------------------------------------
-  // Change the question and you are looking at a new list, so go back to its
-  // first page. (Sorting counts: page 3 of "ขายดีที่สุด" is a different set of
-  // dishes from page 3 of "ยอดขายรวมมากสุด".)
-  useEffect(() => {
-    setPage(0);
-  }, [shift, group, sortBy, statKey, presetId]);
-
-  const pageCount = Math.max(1, Math.ceil(rows.length / STAT_PAGE_SIZE));
-  // Clamped rather than trusted: the list can shrink under a page that is
-  // already open — a bill cancelled on another device, an order coming in.
-  const safePage = Math.min(page, pageCount - 1);
-  const firstRow = safePage * STAT_PAGE_SIZE;
-  const pageRows = useMemo(
-    () => rows.slice(firstRow, firstRow + STAT_PAGE_SIZE),
-    [rows, firstRow]
-  );
 
   // Month summary, split day vs night with a combined total — moved here from
   // the สรุปยอด tab so it sits directly under today's income/expense cards.
@@ -756,210 +633,16 @@ function OwnerDashboard({ orders, expenses, menu, menuPresets, setMenuPresets, s
         <TrendChart points={points} range={range} />
       </div>
 
-      {/* MENU STATS */}
-      <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
-        <div className="p-3.5 pb-2.5 space-y-2.5">
-          {/* Heading + period toggle on one line: the toggle is what the heading
-              means ("สถิติเมนู ของวันไหน"), so it reads as part of it. */}
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <h3 className="font-extrabold text-base font-kanit text-neutral-800">สถิติเมนู</h3>
-            <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[10px] font-bold">
-              {STAT_PERIODS.map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => setStatPeriod(p.id)}
-                  className={`px-3 py-1.5 rounded-lg transition ${
-                    p.id === statPeriod ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500'
-                  }`}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* The picker the toggle asks for: a full date in รายวัน, month + year
-              in รายเดือน, the year alone in รายปี. text-neutral-800 on the date
-              box because it carries its own background — an inherited colour
-              goes invisible at night. */}
-          {statPeriod === 'year' ? (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-neutral-400 font-bold shrink-0">ปี</span>
-              <select
-                value={statYearKey}
-                onChange={e => setStatYear(e.target.value)}
-                className="flex-1 min-w-0 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-600 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500"
-              >
-                {/* พ.ศ., the way the owner reads a year. */}
-                {statYears.map(y => (
-                  <option key={y} value={y}>{Number(y) + 543}</option>
-                ))}
-              </select>
-            </div>
-          ) : statPeriod === 'day' ? (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-neutral-400 font-bold shrink-0">วันที่</span>
-              <input
-                type="date"
-                value={statDay}
-                max={today}
-                onChange={e => setStatDay(e.target.value || today)}
-                className="flex-1 min-w-0 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-800 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500"
-              />
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-neutral-400 font-bold shrink-0">เดือน</span>
-              {/* A dropdown of months rather than <input type="month">: that
-                  input has no picker at all in Safari (desktop and iOS), where
-                  it degrades to a bare text box. Each option already reads as
-                  เดือน + ปี — "กันยายน 2569". */}
-              <select
-                value={statMonthKey}
-                onChange={e => setStatMonth(e.target.value)}
-                className="flex-1 min-w-0 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-600 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500"
-              >
-                {summaryMonths.map(m => (
-                  <option key={m} value={m}>{monthLabel(m)}</option>
-                ))}
-              </select>
-            </div>
-          )}
-          {statPeriod === 'day' && (
-            <p className="text-[10px] font-bold text-neutral-500 font-thai -mt-1">
-              {formatThaiDate(statDay)}
-              {statDay === today && ' · วันนี้'}
-            </p>
-          )}
-
-          <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[11px] font-bold">
-            {GROUPS.map(g => (
-              <button
-                key={g.id}
-                onClick={() => setGroup(g.id)}
-                className={`flex-1 py-1.5 rounded-lg transition ${g.id === group ? 'bg-admin-field text-neutral-800 shadow-xs' : 'text-neutral-500'}`}
-              >
-                {g.label}
-              </button>
-            ))}
-          </div>
-
-          {/* เฉพาะเมนู brings its own row: pick a saved กลุ่มเมนู, or go and build
-              one. The dropdown lists nothing but its own placeholder until a
-              preset exists — which is the empty state, said out loud. */}
-          {group === 'preset' && (
-            <div className="flex items-center gap-2">
-              <select
-                value={presetId}
-                onChange={e => setPresetId(e.target.value)}
-                className="flex-1 min-w-0 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-600 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500"
-              >
-                <option value="">เลือก preset</option>
-                {presetList.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-              <button
-                onClick={() => setShowPresets(true)}
-                className="shrink-0 bg-admin-cta hover:bg-admin-cta-hover text-admin-cta-ink font-bold py-1.5 px-3 rounded-xl transition font-kanit flex items-center justify-center gap-1 text-[11px]"
-              >
-                <Pencil className="w-3.5 h-3.5 flex-shrink-0" />
-                แก้ไข preset
-              </button>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-neutral-400 font-bold shrink-0">เรียงตาม</span>
-            <select
-              value={sortBy}
-              onChange={e => setSortBy(e.target.value)}
-              className="flex-1 border rounded-xl py-1.5 px-2 text-[11px] font-bold text-neutral-600 bg-admin-field focus:outline-none focus:ring-1 focus:ring-amber-500"
-            >
-              <option value="qty">จำนวนจานที่ขายได้มากสุด</option>
-              <option value="revenue">ยอดขายรวมมากสุด</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-[2fr_1fr_1fr] gap-2 px-3.5 py-2 bg-neutral-50 border-y text-[10px] font-extrabold text-neutral-500 font-kanit">
-          <span>ชื่อเมนู</span>
-          <span className="text-right">จำนวนที่ขายได้</span>
-          <span className="text-right">ยอดขายรวม</span>
-        </div>
-
-        {pageRows.length > 0 ? (
-          pageRows.map((r, i) => (
-            <div
-              key={r.name}
-              className="grid grid-cols-[2fr_1fr_1fr] gap-2 px-3.5 py-2.5 border-b border-neutral-100 last:border-0 text-[11px] items-center font-thai"
-            >
-              {/* The rank is the table's whole point once it is paged: without
-                  it, row 1 of page 2 looks like the best seller. It keeps
-                  counting across pages because the sort does. */}
-              <span className="font-bold text-neutral-800 flex items-baseline gap-1.5 min-w-0">
-                <span className="text-[9.5px] font-mono text-neutral-400 shrink-0 tabular-nums">
-                  {firstRow + i + 1}.
-                </span>
-                <span className="truncate">{r.name}</span>
-              </span>
-              <span className="text-right font-mono text-neutral-700">{r.qty}</span>
-              <span className="text-right font-mono font-bold text-neutral-800">
-                {baht(r.revenue)} บาท
-              </span>
-            </div>
-          ))
-        ) : (
-          <p className="text-neutral-400 text-xs py-6 text-center font-medium font-thai">
-            {awaitingPreset
-              ? 'เลือก preset เพื่อดูสถิติเฉพาะกลุ่มเมนูนั้น'
-              : 'ยังไม่มียอดขายในช่วงที่เลือก'}
-          </p>
-        )}
-
-        {/* PAGING — only when there is a second page to go to. It says which
-            rows these are out of how many, because "หน้า 2/5" does not answer
-            "ยังเหลืออีกกี่เมนู". */}
-        {pageCount > 1 && (
-          <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-neutral-50 border-t text-[10px] font-bold">
-            <button
-              onClick={() => setPage(safePage - 1)}
-              disabled={safePage === 0}
-              className="px-3 py-1.5 rounded-lg border border-neutral-200 text-neutral-600 bg-admin-field transition hover:bg-neutral-100 disabled:opacity-40 disabled:hover:bg-admin-field"
-            >
-              ‹ ก่อนหน้า
-            </button>
-            <span className="text-neutral-500 font-mono tabular-nums text-center">
-              {firstRow + 1}–{firstRow + pageRows.length} จาก {rows.length}
-            </span>
-            <button
-              onClick={() => setPage(safePage + 1)}
-              disabled={safePage >= pageCount - 1}
-              className="px-3 py-1.5 rounded-lg border border-neutral-200 text-neutral-600 bg-admin-field transition hover:bg-neutral-100 disabled:opacity-40 disabled:hover:bg-admin-field"
-            >
-              ถัดไป ›
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* แก้ไข preset — the same kind of panel as แก้ไขเมนูเสริม in จัดการเมนู,
-          over the dashboard rather than in a tab of its own: presets exist only
-          to be read here, so this is where they are written. */}
-      {showPresets && (
-        <MenuPresetManager
-          presets={presetList}
-          menu={menu}
-          onSave={(next) => {
-            setMenuPresets(next);
-            // A preset that was just deleted must not stay selected behind the
-            // panel — the table would keep filtering by a group that is gone.
-            if (presetId && !next.some((p) => p.id === presetId)) setPresetId('');
-          }}
-          onClose={() => setShowPresets(false)}
-          showToast={showToast}
-        />
-      )}
+      {/* MENU STATS — shared with the ผู้จัดการคลัง's ดูยอดขาย tab */}
+      <MenuStatsCard
+        orders={orders}
+        expenses={expenses}
+        menu={menu}
+        shift={shift}
+        menuPresets={menuPresets}
+        setMenuPresets={setMenuPresets}
+        showToast={showToast}
+      />
     </div>
   );
 }

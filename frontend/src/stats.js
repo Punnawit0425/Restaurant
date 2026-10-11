@@ -15,7 +15,7 @@ import { entryKind } from './expenses';
 // was created.
 //
 // The day is the WORKING day, not the calendar one: it runs 06:00 → 06:00, the
-// same boundary the time clock uses, so the night side's last bills — settled at
+// same boundary the shifts use, so the night side's last bills — settled at
 // 00:30, at 02:00 — are counted on the evening that earned them instead of
 // opening tomorrow's takings while the shop is still serving. Which means the
 // dashboard's "วันนี้" resets at 06:00, not at midnight.
@@ -163,6 +163,37 @@ export function takingsByMethod(orders, expenses, periodKey) {
   });
 
   return out;
+}
+
+// Where the outgoings went: the period's รายจ่าย summed per category, split by
+// shop. Only categories that were actually spent on appear — a month that paid
+// nothing but ค่าวัตถุดิบ is one row, not six rows of 0. Largest first, since the
+// question is "what did the money go on". `periodKey` is 'YYYY-MM' or
+// 'YYYY-MM-DD', matched as a prefix of the entry's date like takingsByMethod.
+//
+// Returns { rows: [{ category, day, night, total }], day, night, total }.
+export function expensesByCategory(expenses, periodKey) {
+  const byCat = new Map();
+  const totals = { day: 0, night: 0, total: 0 };
+
+  (expenses || []).forEach((e) => {
+    if (entryKind(e) !== 'expense') return;
+    if (!e.date || !e.date.startsWith(periodKey)) return;
+    const amount = Number(e.amount) || 0;
+    if (!amount) return;
+    const category = e.category || 'อื่น ๆ';
+    const row = byCat.get(category) || { category, day: 0, night: 0, total: 0 };
+    // Same rule as takingsByMethod: a shop id that is neither side still counts
+    // in รวม, so the total never disagrees with the ledger.
+    [row, totals].forEach((col) => {
+      if (e.shop === 'day' || e.shop === 'night') col[e.shop] += amount;
+      col.total += amount;
+    });
+    byCat.set(category, row);
+  });
+
+  const rows = [...byCat.values()].sort((a, b) => b.total - a.total);
+  return { rows, ...totals };
 }
 
 // The last `days` working days ending with the one in progress, oldest first,

@@ -43,7 +43,7 @@ const BANGKOK_DATE = new Intl.DateTimeFormat('en-CA', {
 });
 
 // The two ends of the day shift, in Bangkok hours. The day side opens with the
-// working day (06:00, the same boundary the time clock counts from) and hands
+// working day (06:00, the same boundary every date in the app rolls over on) and hands
 // over to the night side at 17:00 — so these two constants, not a literal, are
 // what every "which shop is open" question resolves to.
 export const DAY_SHIFT_START_HOUR = 6;
@@ -60,9 +60,9 @@ export function shiftNow() {
   return shiftFromDate(new Date());
 }
 
-// --- The working day (for the time clock) -----------------------------------
+// --- The working day ----------------------------------------------------------
 // A shop day is NOT a calendar day: the night side closes after midnight, so a
-// worker who clocks in at 20:00 and out at 01:30 has to land on ONE record. The
+// shift that opens at 20:00 and closes at 01:30 has to land on ONE date. The
 // day therefore runs 06:00 today → 06:00 tomorrow, and everything before 06:00
 // counts as the previous date — the same boundary the day shift opens on.
 //

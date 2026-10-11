@@ -9,6 +9,7 @@ import {
   summaryTotals,
   ledgerRows,
   takingsByMethod,
+  expensesByCategory,
   PAY_METHODS
 } from '../stats';
 
@@ -119,6 +120,11 @@ function OwnerSummary({ orders, expenses, month, setMonth, showToast, onDeleteEn
     () => PAY_METHODS.filter((m) => m.id !== 'other' || takings.all.other > 0),
     [takings]
   );
+
+  // Where the month's outgoings went, one row per category actually spent on.
+  // Always the whole month (like ประวัติ below), even while the takings table
+  // above is reading a single day.
+  const spending = useMemo(() => expensesByCategory(expenses, month), [expenses, month]);
 
   // The same month totals, but split by shift so day and night can be checked
   // side by side. Each shift also carries its own rows for the per-sheet export.
@@ -275,6 +281,51 @@ function OwnerSummary({ orders, expenses, month, setMonth, showToast, onDeleteEn
               <span className="text-right font-mono font-extrabold text-admin-income">{baht(takings.all.total)}</span>
             </div>
           </>
+        )}
+      </div>
+
+      {/* EXPENSES BY CATEGORY — the outgoing twin of the takings table above:
+          what the month's money was spent on, split across the two shops. Only
+          categories with spending in them get a row, largest first, so a month
+          that bought nothing but ค่าวัตถุดิบ reads as exactly that. */}
+      <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
+        <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-neutral-50 border-b">
+          <span className="text-[11px] font-extrabold text-neutral-700 font-kanit">
+            รายจ่ายแยกตามประเภท
+          </span>
+          <span className="text-[10px] font-bold text-neutral-500">{monthLabel(month)}</span>
+        </div>
+
+        {spending.rows.length > 0 ? (
+          <>
+            <div className="grid grid-cols-[1.2fr_1fr_1fr_1fr] gap-1.5 px-3 py-2 bg-neutral-50 border-b text-[9.5px] font-extrabold text-neutral-500 font-kanit">
+              <span>ประเภท</span>
+              <span className="text-right">กลางวัน</span>
+              <span className="text-right">กลางคืน</span>
+              <span className="text-right">รวม</span>
+            </div>
+            {spending.rows.map(r => (
+              <div
+                key={r.category}
+                className="grid grid-cols-[1.2fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 border-b border-neutral-100 text-[11px] items-center font-thai"
+              >
+                <span className="font-bold text-neutral-800 leading-tight">{r.category}</span>
+                <span className="text-right font-mono text-neutral-600">{baht(r.day)}</span>
+                <span className="text-right font-mono text-neutral-600">{baht(r.night)}</span>
+                <span className="text-right font-mono font-bold text-admin-expense">{baht(r.total)}</span>
+              </div>
+            ))}
+            <div className="grid grid-cols-[1.2fr_1fr_1fr_1fr] gap-1.5 px-3 py-2.5 bg-admin-panel text-[11px] items-center font-thai">
+              <span className="font-extrabold text-neutral-800 font-kanit">รวมรายจ่าย</span>
+              <span className="text-right font-mono font-bold text-neutral-700">{baht(spending.day)}</span>
+              <span className="text-right font-mono font-bold text-neutral-700">{baht(spending.night)}</span>
+              <span className="text-right font-mono font-extrabold text-admin-expense">{baht(spending.total)}</span>
+            </div>
+          </>
+        ) : (
+          <p className="text-neutral-500 text-xs py-6 text-center font-medium font-thai">
+            ยังไม่มีรายจ่ายในเดือน {monthLabel(month)}
+          </p>
         )}
       </div>
 

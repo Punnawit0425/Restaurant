@@ -143,7 +143,7 @@ right panel.
   public because unauthenticated customers place orders (and that decrements
   stock) — those payloads are validated and size-capped.
 - **Owner-only writes are role-gated**: editing staff accounts, shop settings,
-  expenses, and the manual timeclock/payroll endpoints require an `owner`
+  expenses, and the payroll (days worked / paid status) endpoints require an `owner`
   session (re-checked against the live record), so a plain staff token gets 403.
 - **CORS** is limited to `ALLOWED_ORIGINS` (defaults to the local dev ports).
 - Set a stable **`AUTH_SECRET`** in `backend/.env` so sessions survive restarts.

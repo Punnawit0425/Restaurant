@@ -17,7 +17,7 @@ Two kinds of saved data:
 
 - **In Postgres** → menu, orders, stock.
 - **On a disk file (`data.json`) + `uploads/` folder** → staff logins, shop
-  settings, payroll, time-clock, and uploaded menu photos.
+  settings, payroll (days worked + paid status), and uploaded menu photos.
 
 The disk stuff is why we need a **Volume** (a permanent drawer that survives
 redeploys). The database is handled by Railway's managed Postgres.
@@ -106,7 +106,7 @@ safe and complete.)
 In the **app service** (not the database): **Settings → Volumes → New Volume**,
 mount path **`/data`**.
 
-This is where `data.json` (staff, settings, payroll, time-clock) and uploaded
+This is where `data.json` (staff, settings, payroll, days worked) and uploaded
 menu photos will live. Without it, every redeploy wipes them.
 
 ## Step 6 — Set environment variables

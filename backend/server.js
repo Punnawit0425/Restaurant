@@ -22,10 +22,10 @@
 //     An account the owner created without one cannot be signed into; its person
 //     chooses the password at first sign-in via POST /api/login/claim.
 //   * Writing menu / staff / settings requires a valid staff token.
-//   * Writing `orders` and `stock` is intentionally public — placing an order
-//     from an unauthenticated customer tab both appends an order and decrements
-//     stock — but the payloads are validated and size-capped. (Making these
-//     fully server-authoritative would be the next hardening step.)
+//   * Writing `orders` is intentionally public — an unauthenticated customer
+//     tab has to be able to place one — but a session-less write can only add
+//     lines or ask to เช็กบิล. Every line is re-priced from the server's menu,
+//     and a new bill's status and total are derived here (customer-orders.js).
 //   * CORS is restricted to configured origins.
 // ---------------------------------------------------------------------------
 
@@ -53,7 +53,8 @@ import {
 } from './menu-db.js';
 import { buildPresetsFromLegacy, validateAddonPresets } from './addon-presets.js';
 import { ensureOrdersTable, loadOrders, saveOrders } from './orders-db.js';
-import { reconcileCustomerBill, reconcileStaffOrdersWrite, withRoundKeys, dropAbsorbed, numberTakeawayOrders } from './order-merge.js';
+import { reconcileCustomerBill, reconcileStaffOrdersWrite, withRoundKeys, dropAbsorbed, numberTakeawayOrders, deriveBillStatus } from './order-merge.js';
+import { OrderRejected, cleanCustomerLine, cleanCustomerOrder, cleanCheckoutRequest } from './customer-orders.js';
 import { fetchStockItems, fetchStockAvailability, createStockItem, adjustStockItem, setStockItemImage, setStockImageByName, deleteStockItemByName, deleteStockItem, restockAll, consumeStockByName, ensureStockHistoryTable, logStockChange, fetchStockHistory } from './stock-db.js';
 import { hashPassword, verifyPassword, isHashed, signToken, verifyToken } from './auth.js';
 
@@ -86,7 +87,7 @@ if (!HAS_DB) {
 }
 
 // The resources a client is allowed to read/replace.
-const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings', 'expenses', 'timeclock', 'payroll', 'addonPresets', 'menuPresets'];
+const RESOURCES = ['orders', 'menu', 'stock', 'staff', 'settings', 'expenses', 'workdays', 'payroll', 'addonPresets', 'menuPresets'];
 // Writing any of these requires a valid staff session token. Only `orders` is
 // left out, because an unauthenticated customer tab has to be able to place one
 // — and even that write is reconciled rather than trusted wholesale (see
@@ -106,47 +107,11 @@ const OWNER_RESOURCES = new Set(['staff', 'settings', 'expenses', 'addonPresets'
 // Server-owned resources: readable by everyone via /api/state, but never
 // replaceable wholesale through PUT — records are only appended/updated by the
 // server's own endpoints, so timestamps can't be forged from a browser.
-const SERVER_OWNED_RESOURCES = new Set(['timeclock', 'payroll']);
+const SERVER_OWNED_RESOURCES = new Set(['workdays', 'payroll']);
 // Every access level an account can hold. 'inventory' (ผู้จัดการคลัง) sees only
 // คลัง and จัดการเมนู, and in จัดการเมนู only the dishes that have a คลัง row —
 // see requireStockedDish and friends below.
 const STAFF_ROLES = ['owner', 'staff', 'inventory'];
-
-// --- Staff time clock (ลงเวลาเข้า-ออกงาน) -----------------------------------
-// Clocking in/out works from anywhere: the only thing recorded is the SERVER's
-// current time (the client clock is never trusted) against the logged-in
-// account. One clock-in + one clock-out per person per day.
-//
-// There used to be a GPS geofence here — the browser sent its position and the
-// server refused anything more than 50 m from the shop. It was removed on
-// request: staff clock in from home, from a delivery run, or on a phone whose
-// location permission is off, and a refusal there costs someone a day's wage.
-// The account behind the session is what identifies who clocked, not where.
-
-// The WORKING day (YYYY-MM-DD) a moment belongs to, for "one in + one out per
-// day". A shop day runs 06:00 today → 06:00 tomorrow, not midnight to midnight:
-// the night side closes after midnight, so someone who clocks in at 20:00 and
-// out at 01:30 must land on a single record instead of two half-days. Shifting
-// the clock back by the start hour reduces that to a plain local date.
-// Mirrors workdayKey() in frontend/src/shift.js — keep the two in step.
-//
-// Read in Bangkok, never on the container clock: node:alpine has no timezone
-// data of its own and defaults to UTC, which would put this boundary at 13:00
-// Thai time — splitting a day shift across two records and paying the wrong
-// number of days. The Dockerfile also sets TZ, but this does not depend on it.
-const WORKDAY_START_HOUR = 6;
-
-const BANGKOK_DATE = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Asia/Bangkok',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
-
-function workdayKey(ts = Date.now()) {
-  const ms = ts instanceof Date ? ts.getTime() : Number(ts);
-  return BANGKOK_DATE.format(new Date(ms - WORKDAY_START_HOUR * 60 * 60 * 1000));
-}
 
 // --- Load / persist state ---------------------------------------------------
 let state;
@@ -161,12 +126,14 @@ try {
   state = structuredClone(SEED);
   console.log('[backend] No data.json found — seeding fresh state');
 }
-// The seed predates the time clock, so the resource loop above may have left
-// this undefined on both fresh and existing installs.
-if (!Array.isArray(state.timeclock)) state.timeclock = [];
 // Open bills carry `roundKeys` so a stale write cannot erase a round it never
 // saw — see order-merge.js.
 if (Array.isArray(state.orders)) state.orders = dropAbsorbed(state.orders).map(withRoundKeys);
+// Owner-typed days worked per staff member per month, keyed "user__YYYY-MM".
+// Newer than the seed, so absent on every existing install.
+if (!state.workdays || typeof state.workdays !== 'object' || Array.isArray(state.workdays)) {
+  state.workdays = {};
+}
 // Owner-set "paid / not paid" per staff member per month, keyed "user__YYYY-MM".
 if (!state.payroll || typeof state.payroll !== 'object' || Array.isArray(state.payroll)) {
   state.payroll = {};
@@ -207,7 +174,7 @@ function ensureAddonPresets() {
 // The ไอดีพนักงาน (`pin`) is deliberately NOT treated the same way. It is an
 // attribution code the owner hands out and is expected to be able to read back
 // ("สมชายลืมไอดี เลขอะไรนะ"), which a one-way hash makes impossible — so the
-// 4 digits are kept alongside `pinHash` and shown to the owner in หน้าตั้งค่า.
+// 4 digits are kept alongside `pinHash` and shown to the owner in the ข้อมูลพนักงาน tab.
 // It is still never served to anyone but an owner session (see sanitizeState),
 // and it is not a password: signing in needs a real account, and the PIN only
 // puts a name on a bill or a discount.
@@ -340,22 +307,24 @@ async function persistOrdersToDb() {
 // once. Three tiers:
 //   * public / customer (no session): storefront data only — menu, stock,
 //     orders, settings, addons, choices.
-//   * any signed-in staff: the above + the time clock (for the clock-in tab).
-//   * owner: everything, including staff HR (wages/positions), the expense book
-//     and payroll.
+//   * any signed-in staff: the same storefront data.
+//   * owner: everything, including staff HR (wages/positions), the expense book,
+//     days worked and payroll.
 // Password material is stripped for everyone. This is what stops a diner on the
 // shop WiFi from reading salaries/expenses off the public /api/state.
 function sanitizeState(s, session = null) {
   const account = session && (s.staff || []).find((a) => a.user === session.user);
-  const isAuthed = !!account;
   const isOwner = account?.role === 'owner';
+  // `timeclock` is what the removed ลงเวลาเข้า-ออกงาน feature left in data.json.
+  // It stays on disk as an archive but is never served to anyone.
+  const { timeclock, ...rest } = s;
   return {
-    ...s,
+    ...rest,
     // Password material never leaves the server — not even for the owner.
     //
     // The ไอดีพนักงาน does, but only on an owner session: the owner is the person
     // who assigns the codes and has to be able to read one back to whoever
-    // forgot it, so หน้าตั้งค่า shows the 4 digits. `hasPin` still rides along —
+    // forgot it, so the ข้อมูลพนักงาน tab shows the 4 digits. `hasPin` still rides along —
     // an account with no code cannot sign a bill, and one whose code predates
     // this (hash only, nothing readable) shows as ตั้งใหม่ rather than blank.
     staff: isOwner
@@ -369,8 +338,8 @@ function sanitizeState(s, session = null) {
           hasPass: !!passHash,
         }))
       : [],
-    timeclock: isAuthed ? s.timeclock : [],
     expenses: isOwner ? s.expenses : [],
+    workdays: isOwner ? s.workdays : {},
     payroll: isOwner ? s.payroll : {},
   };
 }
@@ -564,6 +533,15 @@ function getSession(req) {
   const match = /^Bearer\s+(.+)$/i.exec(header);
   if (!match) return null;
   return verifyToken(match[1]);
+}
+
+// A caller that SENT a token we cannot verify (expired, or signed with another
+// AUTH_SECRET) is a staff tab whose session lapsed — not a customer. The order
+// routes used to fall through to the public path for it, which reconciles a
+// payment away (a diner cannot close a bill), so the write "succeeded" and the
+// bill stayed open. Answering 401 instead makes the tab sign in again.
+function hasUnverifiedToken(req) {
+  return !!req.get('authorization') && !getSession(req);
 }
 
 function requireAuth(req, res, next) {
@@ -997,8 +975,27 @@ function validateResourceBody(resource, body) {
 // alone would happily accumulate. Staff sessions are not bound by this.
 const MAX_NEW_PUBLIC_ORDERS = 5;
 
-// Returns { orders } with the reconciled array, or { error } to reject with.
+// Returns { orders } with the reconciled array, or { error, status } to reject
+// with. Every line a diner adds, and every bill they open, is rebuilt from the
+// server's menu first (customer-orders.js) — prices, status and total included.
 function applyPublicOrdersWrite(next, prev) {
+  try {
+    return reconcilePublicOrders(next, prev);
+  } catch (err) {
+    if (err instanceof OrderRejected) return { error: err.message, status: 400 };
+    throw err;
+  }
+}
+
+function reconcilePublicOrders(next, prev) {
+  const menuCtx = {
+    menu: state.menu,
+    addonPresets: state.addonPresets,
+    addons: state.addons,
+    choices: state.choices,
+  };
+  const cleanLine = (line) => cleanCustomerLine(line, menuCtx);
+
   // Orders are identified by `id` (client-generated, e.g. 'B' + time + random;
   // mergeOrder preserves it when folding a new round into an open bill). An
   // order without one can never be matched to a stored order, so it is only ever
@@ -1023,25 +1020,28 @@ function applyPublicOrdersWrite(next, prev) {
     // Missing from the payload: kept, so a deletion cannot be expressed.
     // Open bill the tab also has: take only what a diner can change — a new
     // round, or เช็กบิล — on top of the server's copy (order-merge.js).
-    return closed || !after ? before : reconcileCustomerBill(before, after);
+    return closed || !after
+      ? before
+      : reconcileCustomerBill(before, after, cleanLine, cleanCheckoutRequest);
   });
 
+  // Both places that open a bill mint an id, so an id-less entry is not a new
+  // order — it is an older tab echoing back a stored bill it cannot name, and
+  // appending it would only duplicate that bill.
   const fresh = next.filter((o) => {
     const id = idOf(o);
-    return id === null || !matched.has(id);
+    return id !== null && !matched.has(id);
   });
   if (fresh.length > MAX_NEW_PUBLIC_ORDERS) {
-    return { error: 'too many new orders in one write' };
+    return { error: 'too many new orders in one write', status: 403 };
   }
   // A takeaway session id is only ever a short token the phone minted; anything
   // else is dropped rather than stored, since it decides which bill later
   // orders from that phone land on.
   const cleaned = fresh.map((o) => {
-    if (!o || typeof o !== 'object' || o.takeawaySession == null) return o;
     const ok = typeof o.takeawaySession === 'string' && /^[A-Za-z0-9]{1,40}$/.test(o.takeawaySession);
-    if (ok) return o;
     const { takeawaySession, ...rest } = o;
-    return rest;
+    return cleanCustomerOrder(ok ? o : rest, menuCtx, deriveBillStatus);
   });
   // New กลับบ้าน bills get their number from the server (see order-merge.js).
   const added = numberTakeawayOrders(cleaned, merged).map(withRoundKeys);
@@ -1056,6 +1056,10 @@ app.put('/api/:resource', (req, res) => {
   const { resource } = req.params;
   if (!RESOURCES.includes(resource)) {
     return res.status(404).json({ error: `Unknown resource: ${resource}` });
+  }
+
+  if (hasUnverifiedToken(req)) {
+    return res.status(401).json({ error: 'Session expired' });
   }
 
   if (SERVER_OWNED_RESOURCES.has(resource)) {
@@ -1092,8 +1096,8 @@ app.put('/api/:resource', (req, res) => {
     // still reconciled so a stale copy cannot drop a bill or a round that
     // arrived after it last updated (order-merge.js).
     if (resource === 'orders' && !getSession(req)) {
-      const { orders, error } = applyPublicOrdersWrite(req.body, state.orders || []);
-      if (error) return res.status(403).json({ error });
+      const { orders, error, status } = applyPublicOrdersWrite(req.body, state.orders || []);
+      if (error) return res.status(status || 403).json({ error });
       state.orders = orders;
     } else if (resource === 'orders') {
       state.orders = reconcileStaffOrdersWrite(req.body, state.orders || []);
@@ -1112,88 +1116,72 @@ app.put('/api/:resource', (req, res) => {
   res.json({ ok: true });
 });
 
-// Staff clock-in / clock-out. Auth required (the record is tied to the logged-in
-// account). No location check — see the note on the time clock above. The
-// timestamp recorded is the server's clock at the moment of the request. First
-// call of the WORKING day (06:00 → 06:00, see workdayKey) = clock-in, second =
-// clock-out, anything after that is rejected.
-app.post('/api/timeclock/clock', requireAuth, (req, res) => {
-  const user = req.session.user;
-  const account = (state.staff || []).find((s) => s.user === user);
-  const now = Date.now();
-  const date = workdayKey(now);
+// Write only the bills that changed: { changed: [bill, ...] }. Saving `orders`
+// used to PUT the whole array, paid history and all, and that only grows — once
+// it passed the 2 MB body limit every save was refused with 413 while the tab
+// carried on as if it had worked. A tap touches one or two bills, so that is all
+// a tab sends now.
+//
+// The full array is rebuilt here from the server's own copy — each changed bill
+// replaced in place by id, an id never seen before appended, bills folded away
+// by รวมบิล dropped as a full write would drop them — and then goes through the
+// same reconciliation as PUT, so the two paths cannot disagree about what a
+// write may do. PUT stays for tabs still running an older build.
+const MAX_CHANGED_ORDERS = 200;
 
-  let record = state.timeclock.find((r) => r.user === user && r.date === date);
-  let action;
-  if (!record) {
-    record = {
-      id: 'T' + now.toString(36) + Math.random().toString(36).slice(2, 6),
-      user,
-      name: account?.name || user,
-      date,
-      inAt: now,
-      outAt: null,
-    };
-    state.timeclock.push(record);
-    action = 'in';
-  } else if (!record.outAt) {
-    record.outAt = now;
-    action = 'out';
+app.patch('/api/orders', (req, res) => {
+  if (hasUnverifiedToken(req)) {
+    return res.status(401).json({ error: 'Session expired' });
+  }
+
+  const changed = req.body?.changed;
+  const problem = validateResourceBody('orders', changed);
+  if (problem) return res.status(400).json({ error: problem });
+  if (changed.length > MAX_CHANGED_ORDERS) {
+    return res.status(400).json({ error: 'too many changed orders' });
+  }
+  // A bill is matched by id, so one without an id cannot say which bill it
+  // replaces. Both places that create a bill mint one.
+  if (!changed.every((o) => typeof o.id === 'string' && o.id)) {
+    return res.status(400).json({ error: 'each changed order needs an id' });
+  }
+
+  const prev = state.orders || [];
+  const byId = new Map();
+  for (const o of changed) {
+    // First occurrence wins, as in applyPublicOrdersWrite.
+    if (!byId.has(o.id)) byId.set(o.id, o);
+  }
+  const placed = new Set();
+  const replaced = prev.map((o) => {
+    // Only the first stored bill with an id is replaced, so two bills that
+    // happen to share one never collapse into identical copies.
+    if (!o?.id || !byId.has(o.id) || placed.has(o.id)) return o;
+    placed.add(o.id);
+    return byId.get(o.id);
+  });
+  const added = [...byId.values()].filter((o) => !placed.has(o.id));
+  const next = dropAbsorbed([...replaced, ...added]);
+
+  if (getSession(req)) {
+    state.orders = reconcileStaffOrdersWrite(next, prev);
   } else {
-    return res.status(409).json({ error: 'วันนี้ลงเวลาเข้า-ออกครบแล้ว (วันละ 1 ครั้ง)' });
+    // A stored bill without an id is kept by applyPublicOrdersWrite from `prev`
+    // already; passing it again would read as a new order and duplicate it.
+    const { orders, error, status } = applyPublicOrdersWrite(next.filter((o) => o?.id), prev);
+    if (error) return res.status(status || 403).json({ error });
+    state.orders = orders;
   }
 
   persist();
+  persistOrdersToDb();
   broadcast();
-  res.json({ ok: true, action, record });
-});
-
-// Owner backfill: create or correct a day's in/out for a staff member who forgot
-// to clock (or clocked wrong). Auth required, no geofence — this is a manual
-// admin action. `date` is YYYY-MM-DD; `inAt`/`outAt` are epoch ms (outAt may be
-// null). Upserts the single record for that user+date.
-app.post('/api/timeclock/manual', requireOwner, (req, res) => {
-  const user = String(req.body?.user || '').trim();
-  const date = String(req.body?.date || '').trim();
-  const inAt = req.body?.inAt == null ? null : Number(req.body.inAt);
-  const outAt = req.body?.outAt == null ? null : Number(req.body.outAt);
-
-  const account = (state.staff || []).find((s) => s.user === user);
-  if (!account) return res.status(400).json({ error: 'ไม่พบพนักงานคนนี้' });
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'รูปแบบวันที่ไม่ถูกต้อง' });
-  if (inAt != null && !Number.isFinite(inAt)) return res.status(400).json({ error: 'เวลาเข้าไม่ถูกต้อง' });
-  if (outAt != null && !Number.isFinite(outAt)) return res.status(400).json({ error: 'เวลาออกไม่ถูกต้อง' });
-  if (inAt == null && outAt == null) return res.status(400).json({ error: 'ต้องระบุเวลาเข้าหรือออกอย่างน้อยหนึ่งช่อง' });
-  if (inAt != null && outAt != null && outAt < inAt) {
-    return res.status(400).json({ error: 'เวลาออกต้องอยู่หลังเวลาเข้า' });
-  }
-
-  let record = state.timeclock.find((r) => r.user === user && r.date === date);
-  if (record) {
-    if (inAt != null) record.inAt = inAt;
-    if (outAt !== undefined) record.outAt = outAt;
-    record.manual = true;
-  } else {
-    record = {
-      id: 'T' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      user,
-      name: account.name || user,
-      date,
-      inAt: inAt ?? null,
-      outAt: outAt ?? null,
-      manual: true,
-    };
-    state.timeclock.push(record);
-  }
-
-  persist();
-  broadcast();
-  res.json({ ok: true, record });
+  res.json({ ok: true });
 });
 
 // Owner sets a staff member's monthly payroll status ('paid' | 'unpaid').
 // Keyed "user__YYYY-MM". Auth required.
-app.post('/api/timeclock/payroll', requireOwner, (req, res) => {
+app.post('/api/payroll/status', requireOwner, (req, res) => {
   const user = String(req.body?.user || '').trim();
   const month = String(req.body?.month || '').trim();
   const status = req.body?.status === 'paid' ? 'paid' : 'unpaid';
@@ -1217,11 +1205,45 @@ app.post('/api/timeclock/payroll', requireOwner, (req, res) => {
   res.json({ ok: true });
 });
 
+// Owner records how many days a staff member worked in a month. Keyed
+// "user__YYYY-MM"; 0 removes the entry (absent = 0 days, keeps the store small).
+// The salary is days × ค่าแรง/วัน, computed on the owner's screen.
+app.post('/api/payroll/days', requireOwner, (req, res) => {
+  const user = String(req.body?.user || '').trim();
+  const month = String(req.body?.month || '').trim();
+  const days = Number(req.body?.days);
+  if (!user) return res.status(400).json({ error: 'missing user' });
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'รูปแบบเดือนไม่ถูกต้อง' });
+  if (!Number.isFinite(days) || days < 0 || days > 31) {
+    return res.status(400).json({ error: 'จำนวนวันต้องอยู่ระหว่าง 0–31' });
+  }
+
+  const target = (state.staff || []).find((a) => a.user === user);
+  if (!target) return res.status(400).json({ error: 'ไม่พบพนักงานคนนี้' });
+  // Same rule as the payroll status: an owner has no wage to count days for.
+  if (target.role === 'owner') {
+    return res.status(400).json({ error: 'บัญชีเจ้าของร้านไม่มีเงินเดือนให้คำนวณ' });
+  }
+
+  const key = `${user}__${month}`;
+  // A month already marked จ่ายแล้ว has its wage filed in รายจ่าย at the old
+  // figure — changing the days under it would leave the two disagreeing.
+  if (state.payroll[key] === 'paid') {
+    return res.status(409).json({ error: 'เดือนนี้จ่ายเงินเดือนแล้ว — เปลี่ยนสถานะเป็นยังไม่จ่ายก่อนแก้จำนวนวัน' });
+  }
+  if (days > 0) state.workdays[key] = days;
+  else delete state.workdays[key];
+
+  persist();
+  broadcast();
+  res.json({ ok: true });
+});
+
 // Owner edits ONE staff account: display name, username, password, daily wage.
 //
 // Deliberately not part of the whole-array PUT /api/staff. Two things that write
 // cannot do:
-//   * a rename has to carry the person's history with it — time-clock rows and
+//   * a rename has to carry the person's history with it — days worked and
 //     payroll flags are keyed by username, so rewriting the staff array alone
 //     would leave a renamed member showing 0 days worked and an unpaid month
 //     that was already paid;
@@ -1249,7 +1271,7 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
     if (req.session.user === current) {
       return res.status(400).json({ error: 'เปลี่ยนสิทธิ์ของบัญชีที่กำลังเข้าใช้งานอยู่ไม่ได้' });
     }
-    // And the shop must keep someone who can reach หน้าตั้งค่า at all.
+    // And the shop must keep someone who can reach the back office at all.
     const otherOwners = (state.staff || []).filter((s) => s.role === 'owner' && s.user !== current);
     if (account.role === 'owner' && !otherOwners.length) {
       return res.status(400).json({ error: 'ต้องมีบัญชีผู้บริหารอย่างน้อย 1 บัญชี' });
@@ -1303,7 +1325,7 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
   account.dailyWage = role === 'owner' ? 0 : dailyWage;
   if (pass) account.passHash = hashPassword(pass); // blank = keep the old one
   // The code is hashed for checking AND kept as digits for the owner to read
-  // back in หน้าตั้งค่า — see the note on migrateStaffPasswords.
+  // back in the ข้อมูลพนักงาน tab — see the note on migrateStaffPasswords.
   if (pin) {
     account.pinHash = hashPassword(pin);
     account.pin = pin;
@@ -1311,23 +1333,18 @@ app.patch('/api/staff/:user', requireOwner, (req, res) => {
 
   if (nextUser !== current) {
     account.user = nextUser;
-    for (const rec of state.timeclock || []) {
-      if (rec.user === current) rec.user = nextUser;
-    }
-    const movedPayroll = {};
-    for (const [key, value] of Object.entries(state.payroll || {})) {
-      const renamed = key.startsWith(`${current}__`)
-        ? `${nextUser}__${key.slice(current.length + 2)}`
-        : key;
-      movedPayroll[renamed] = value;
-    }
-    state.payroll = movedPayroll;
-  }
-  // The display name is copied onto each time-clock row when it is written, so
-  // refresh those too — otherwise the attendance tables keep the old name for
-  // every day already worked.
-  for (const rec of state.timeclock || []) {
-    if (rec.user === account.user) rec.name = account.name;
+    const moveKeys = (store) => {
+      const moved = {};
+      for (const [key, value] of Object.entries(store || {})) {
+        const renamed = key.startsWith(`${current}__`)
+          ? `${nextUser}__${key.slice(current.length + 2)}`
+          : key;
+        moved[renamed] = value;
+      }
+      return moved;
+    };
+    state.workdays = moveKeys(state.workdays);
+    state.payroll = moveKeys(state.payroll);
   }
 
   persist();
@@ -1805,6 +1822,18 @@ function logStock(req, fields) {
   );
 }
 
+// The count never drops below 0, so a cut bigger than what is on hand moves by
+// less than was asked. The history must record the real movement — otherwise
+// adding it up no longer gives the on-hand count — and say that the shelf ran
+// short, which is itself a sign the count had drifted.
+function shortfallNote(requested, moved, before) {
+  if (moved === requested) return null;
+  return `ขอตัด ${Math.abs(requested)} แต่คลังเหลือ ${before} — ตัดได้ ${Math.abs(moved)}`;
+}
+
+// A stock row as the client sees it (the internal before-count stays here).
+const stockRowOut = ({ quantityBefore: _before, ...row }) => row;
+
 // The whole inventory.
 app.get('/api/stock-items', requireAuth, async (_req, res) => {
   try {
@@ -1892,11 +1921,15 @@ app.patch('/api/stock-items/:id', requireAuth, async (req, res) => {
       if (!item) return res.status(404).json({ error: 'ไม่พบสินค้านี้ในคลัง' });
     }
     if (hasDelta) {
-      item = await adjustStockItem(id, delta);
-      if (!item) return res.status(404).json({ error: 'ไม่พบสินค้านี้ในคลัง' });
+      const row = await adjustStockItem(id, delta);
+      if (!row) return res.status(404).json({ error: 'ไม่พบสินค้านี้ในคลัง' });
+      const moved = row.quantity - row.quantityBefore;
+      const shortfall = shortfallNote(delta, moved, row.quantityBefore);
+      item = stockRowOut(row);
       logStock(req, {
         action: 'adjust', itemId: item.id, itemName: item.name,
-        category: item.category, delta, quantityAfter: item.quantity, note: reason,
+        category: item.category, delta: moved, quantityAfter: item.quantity,
+        note: [reason, shortfall].filter(Boolean).join(' · ') || null,
       });
     }
     res.json({ ok: true, item });
@@ -1936,23 +1969,31 @@ app.delete('/api/stock-items/:id', requireAuth, async (req, res) => {
 // staff mark a dish เสิร์ฟแล้ว (negative qty restores it on un-serve). A dish
 // with no matching row returns { item: null } rather than 404: not every menu
 // item is stock-linked, and the serve tap must not fail because of that.
+//
+// An optional { opKey } makes the call safe to repeat: the tablet retries a cut
+// whose reply it never got, and a key already applied is not cut again.
 app.post('/api/stock-items/consume', requireAuth, async (req, res) => {
   const name = String(req.body?.name || '').trim();
   const qty = Number(req.body?.qty);
+  const opKey = String(req.body?.opKey || '').trim().slice(0, 100) || null;
   if (!name) return res.status(400).json({ error: 'ต้องระบุชื่อรายการ' });
   if (!Number.isInteger(qty) || qty === 0 || Math.abs(qty) > 999) {
     return res.status(400).json({ error: 'ค่า qty ต้องเป็นจำนวนเต็มไม่เกิน ±999' });
   }
   try {
-    const item = await consumeStockByName(name, qty);
-    // Only log a real movement — an unmatched name is a no-op (item === null).
-    if (item) {
+    const { item: row, duplicate } = await consumeStockByName(name, qty, opKey);
+    const item = row ? stockRowOut(row) : null;
+    // Only log a real movement — an unmatched name is a no-op (item === null),
+    // and a repeated opKey was already logged the first time.
+    if (row && !duplicate) {
+      const moved = row.quantity - row.quantityBefore;
       logStock(req, {
         action: qty >= 0 ? 'serve' : 'unserve', itemId: item.id, itemName: item.name,
-        category: item.category, delta: -qty, quantityAfter: item.quantity,
+        category: item.category, delta: moved, quantityAfter: item.quantity,
+        note: shortfallNote(-qty, moved, row.quantityBefore),
       });
     }
-    res.json({ ok: true, item });
+    res.json({ ok: true, item, duplicate });
   } catch (err) {
     console.error('[backend] Could not consume stock:', err.message);
     res.status(502).json({ error: 'ตัดสต็อกไม่สำเร็จ' });
@@ -1964,11 +2005,12 @@ app.post('/api/stock-items/restock', requireAuth, async (req, res) => {
   const delta = Number(req.body?.delta);
   if (!Number.isFinite(delta)) return res.status(400).json({ error: 'ค่า delta ต้องเป็นตัวเลข' });
   try {
-    const changed = await restockAll(delta);
+    const { changed, clamped } = await restockAll(delta);
     // One aggregate line for the whole เติมทั้งหมด, since there's no single count.
     logStock(req, {
       action: 'restock-all', itemName: `ทั้งหมด (${changed} รายการ)`,
       delta, quantityAfter: null,
+      note: clamped ? `${clamped} รายการเหลือไม่ถึง ${Math.abs(delta)} — ตัดได้ไม่เต็ม` : null,
     });
     res.json({ ok: true, changed });
   } catch (err) {
@@ -1981,8 +2023,13 @@ app.post('/api/stock-items/restock', requireAuth, async (req, res) => {
 // by how much. Newest first; capped so a long history never floods the client.
 app.get('/api/stock-history', requireAuth, async (req, res) => {
   const limit = Math.min(Math.max(Number.parseInt(req.query?.limit, 10) || 200, 1), 500);
+  // Optional working day to show ('YYYY-MM-DD'); absent = latest across all days.
+  const date = req.query?.date ? String(req.query.date) : null;
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'รูปแบบวันที่ไม่ถูกต้อง' });
+  }
   try {
-    res.json({ items: await fetchStockHistory(limit) });
+    res.json({ items: await fetchStockHistory(limit, date) });
   } catch (err) {
     console.error('[backend] Could not read stock history:', err.message);
     res.status(502).json({ error: 'อ่านประวัติการบันทึกสต็อกไม่สำเร็จ' });

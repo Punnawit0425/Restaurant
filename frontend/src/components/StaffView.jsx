@@ -2,13 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { extrasFor, defaultChoices, choicesCost } from '../menu-groups';
 import { searchMenu, SHIFT_LABELS, GROUP_LABELS } from '../menu-search';
-import { workdayKey, WORKDAY_START_HOUR, shiftNow } from '../shift';
+import { shiftNow, workdayKey } from '../shift';
 import { generateInvoiceNo, generateOrderNo } from '../invoice';
 import { mergeOrder, absorbBill, combineLines, itemRound, itemStatus, statusFlowFor, deriveBillStatus, ITEM_STATUS_LABELS, ITEM_STATUS_COLORS, stampKitchenFields, checkoutStage, unservedItems, CHECKOUT_TYPE_LABELS, PAY_METHOD_LABELS, GRAB_TABLE, TAKEAWAY_TABLE, singleRoundBase, nextSingleRoundTable, tableLabel, isDiscountItem, billDiscount, discountBase, discountAmount, discountSpec, discountLabel, withDiscount } from '../orders';
 import KitchenBoard from './KitchenBoard';
 import PinGate from './PinGate';
-import { fetchStockItems, adjustStockItem, consumeStockByName, fetchStockHistory, resolveImageUrl, clockTime } from '../api';
-import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, fmtStockTime } from '../stock-history';
+import { fetchStockItems, adjustStockItem, consumeStockByName, resolveImageUrl } from '../api';
+import { newStockOpKey, queueStockCut, flushStockCuts, pendingStockCutCount, isPermanentStockError } from '../stock-retry';
+import { STOCK_ACTION_LABELS, STOCK_ACTION_COLORS, STOCK_HISTORY_DAY_LIMIT, fmtStockTime, useStockHistory } from '../stock-history';
+import StockHistoryDateBar from './StockHistoryDateBar';
 import generatePayload from 'promptpay-qr';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -24,8 +26,6 @@ import {
   X,
   Clock,
   MapPin,
-  LogIn,
-  LogOut,
   ChefHat,
   Printer,
   RotateCcw,
@@ -48,6 +48,12 @@ const CHECKOUT_CHIME = [
   [1046, 0.5], [1318, 0.62], [1568, 0.74],
 ];
 
+// A dish finds its คลังวัตถุดิบ row by name under LOWER(TRIM(...)) on the
+// server (see consumeStockByName). The checks here must use the same rule: a
+// plain `===` missed a row imported with a stray space or different case, so
+// the "สินค้าหมดแล้ว" guard let a dish through that the server then cut anyway.
+const stockKey = (v) => String(v || '').trim().toLowerCase();
+
 function StaffView({
   theme,
   menu, 
@@ -60,22 +66,25 @@ function StaffView({
   showToast,
   addons,
   choices,
-  addonPresets,
-  timeclock
+  addonPresets
 }) {
-  const [subTab, setSubTab] = useState('orders'); // orders, take-order, kitchen, stock, timeclock
+  const [subTab, setSubTab] = useState('orders'); // orders, take-order, kitchen, stock
   // คลังวัตถุดิบ tab: read from the SQL `stock_items` table (not the mockup
   // drink `stock` used when taking an order). Loaded when the tab is opened.
   const [stockItems, setStockItems] = useState([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockError, setStockError] = useState('');
   const [stockSearch, setStockSearch] = useState('');
+  // Stock cuts that failed to reach the server and are waiting to be resent
+  // (see stock-retry.js). Shown as a banner until the queue is empty.
+  const [pendingCuts, setPendingCuts] = useState(pendingStockCutCount);
   // ประวัติการบันทึกสต็อก: the audit-log panel, opened from a button in the
   // คลังวัตถุดิบ tab. Loaded on demand so a closed panel costs nothing.
   const [showStockHistory, setShowStockHistory] = useState(false);
-  const [stockHistory, setStockHistory] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState('');
+  const {
+    items: stockHistory, loading: historyLoading, error: historyError,
+    date: historyDate, setDate: setHistoryDate, reload: reloadStockHistory,
+  } = useStockHistory();
   const [orderFilter, setOrderFilter] = useState('active'); // active, new, cooking, served, paid, all
   // The bill currently being sent to the printer. It is rendered into a hidden
   // #bill-print slip (80mm, styled for the Xprinter XP-80T) and fired straight
@@ -145,36 +154,6 @@ function StaffView({
   // live bill at save time is a round that arrived meanwhile (see handleSaveEditedBill).
   const editBillBaseUids = useRef(new Set());
   const [editAddMenuId, setEditAddMenuId] = useState('');
-
-  // --- ลงเวลาเข้า-ออกงาน ----------------------------------------------------
-  // While true the clock button is disabled: we're waiting on the server's
-  // answer. The server stamps the time (the browser's clock is never trusted)
-  // and no longer checks where the request came from.
-  const [clockBusy, setClockBusy] = useState(false);
-
-  // The WORKING day, matching the server's one-record-per-day key: 06:00 today →
-  // 06:00 tomorrow. Anything before 6 AM still belongs to the shift that started
-  // the evening before, so a night worker clocking out at 01:00 closes the same
-  // record they opened.
-  const todayKey = workdayKey();
-  const myClockToday = (timeclock || []).find(
-    (r) => r.user === activeStaffUser && r.date === todayKey
-  );
-  const clockFmt = (ts) =>
-    ts ? new Date(ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.' : '—';
-
-  const handleClockPress = async () => {
-    setClockBusy(true);
-    try {
-      // No success toast: the card itself flips to the new state (เข้างาน time
-      // filled in, button relabelled), which is confirmation enough.
-      await clockTime();
-    } catch (err) {
-      showToast(err.message || 'ลงเวลาไม่สำเร็จ');
-    } finally {
-      setClockBusy(false);
-    }
-  };
 
   // --- New-order notifications (toast + sound) ------------------------------
   // Every order that lands has to reach staff, and "an order" is NOT the same
@@ -654,14 +633,53 @@ function StaffView({
   // state update. Writing per reply meant one re-render of the whole board per
   // dish, each landing at its own moment — invisible on localhost where they all
   // come back together, a visible stutter over a real network.
+  //
+  // A cut that fails is never dropped: it is queued and resent (retryStockCuts)
+  // under the same opKey, so the server applies it exactly once, and the banner
+  // tells staff the คลัง count is behind until it goes through.
   const consumeLinkedStockRow = (item, qty) => {
     const name = linkedStockName(item);
     if (!name || !qty) return Promise.resolve(null);
-    return consumeStockByName(name, qty).catch((err) => {
+    const opKey = newStockOpKey();
+    return consumeStockByName(name, qty, opKey).catch((err) => {
       console.error('[stock] ตัดสต็อกไม่สำเร็จ:', err.message || err);
+      if (isPermanentStockError(err)) {
+        showToast(`ตัดสต็อก "${name}" ไม่สำเร็จ: ${err.message} — กรุณาปรับในคลังเอง`);
+      } else {
+        queueStockCut({ name, qty, opKey });
+        setPendingCuts(pendingStockCutCount());
+        showToast(`ตัดสต็อก "${name}" ไม่สำเร็จ — ระบบจะลองใหม่อัตโนมัติ`);
+      }
       return null;
     });
   };
+
+  // Resend queued cuts: right away, whenever the device comes back online, and
+  // every 20 s while anything is still waiting.
+  const retryStockCuts = async () => {
+    if (pendingStockCutCount() === 0) return;
+    const { rows, sent, dropped } = await flushStockCuts(consumeStockByName);
+    setPendingCuts(pendingStockCutCount());
+    applyStockRows(rows);
+    if (dropped.length > 0) {
+      showToast(`ตัดสต็อกไม่สำเร็จ: ${dropped.map(d => `${d.qty}× ${d.name}`).join(', ')} — กรุณาปรับในคลังเอง`);
+    } else if (sent > 0 && pendingStockCutCount() === 0) {
+      showToast(`ตัดสต็อกที่ค้างไว้สำเร็จแล้ว (${sent} รายการ)`);
+    }
+  };
+  const retryStockCutsRef = useRef(retryStockCuts);
+  retryStockCutsRef.current = retryStockCuts;
+
+  useEffect(() => {
+    const run = () => retryStockCutsRef.current();
+    run();
+    const timer = setInterval(run, 20000);
+    window.addEventListener('online', run);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('online', run);
+    };
+  }, []);
 
   // Fold a batch of updated stock rows into the คลังวัตถุดิบ list in one render.
   const applyStockRows = (rows) => {
@@ -684,7 +702,7 @@ function StaffView({
     if (item?.stockRef && stock[item.stockRef]) limits.push(stock[item.stockRef].count);
     const name = linkedStockName(item);
     if (name) {
-      const row = stockItems.find(it => it.name === name);
+      const row = stockItems.find(it => stockKey(it.name) === stockKey(name));
       if (row) limits.push(row.quantity);
     }
     return limits.length ? Math.min(...limits) : null;
@@ -1018,7 +1036,7 @@ function StaffView({
     }
     if (!shortage) {
       for (const [name, want] of byName) {
-        const row = stockItems.find(it => it.name === name);
+        const row = stockItems.find(it => stockKey(it.name) === stockKey(name));
         if (row && row.quantity < want) { shortage = { name, want, have: row.quantity }; break; }
       }
     }
@@ -1164,9 +1182,23 @@ function StaffView({
   const editBillTotal = (items) =>
     items.reduce((sum, item) => sum + (item.price + (item.addonCost || 0)) * item.qty, 0);
 
+  // Units added in the draft to a line whose stock was ALREADY cut (it was
+  // served), measured against the live bill — those are cut on save.
+  const extraServedQty = (draftItem, liveBill) => {
+    const was = draftItem?.uid && (liveBill?.items || []).find(it => it.uid === draftItem.uid);
+    return was && was.stockDone ? Math.max(0, draftItem.qty - was.qty) : 0;
+  };
+
   const handleEditBillQty = (idx, val) => {
     if (!editingBill) return;
     const items = [...editingBill.items];
+    // Adding to a served dish cuts stock for the extra units, so it is held to
+    // the same rule as the serve tap: no more than the stock has left.
+    if (val > 0) {
+      const extra = extraServedQty(items[idx], orders.find(o => o.id === editingBill.id)) + val;
+      const avail = items[idx].stockDone ? availableStockFor(items[idx]) : null;
+      if (avail !== null && avail < extra) { showToast('สินค้าหมดแล้ว'); return; }
+    }
     items[idx].qty = Math.max(1, items[idx].qty + val);
     setEditingBill({ ...editingBill, items, total: editBillTotal(items) });
   };
@@ -1210,6 +1242,18 @@ function StaffView({
       }));
       showToast('ยกเลิกบิลสำเร็จเนื่องจากลบทุกรายการ');
     } else {
+      // A served dish had its stock cut for the qty it had then. Raising that
+      // qty here means more of it went out, so the extra units are cut now —
+      // read from props, outside the updater, so it fires exactly once.
+      const extras = editingBill.items
+        .map(it => ({ it, qty: extraServedQty(it, live) }))
+        .filter(x => x.qty > 0);
+      if (extras.length > 0) {
+        extras.forEach(({ it, qty }) => changeStockCount(it.stockRef, -qty));
+        // One render for the whole batch (see applyStockRows).
+        Promise.all(extras.map(({ it, qty }) => consumeLinkedStockRow(it, qty))).then(applyStockRows);
+      }
+
       setOrders(prev => prev.map(o => {
         if (o.id === editingBill.id) {
           const arrived = linesArrivedSinceEdit(o);
@@ -1339,18 +1383,11 @@ function StaffView({
     await adjustStockItemQty(item.id, amount);
   };
 
-  // Open the ประวัติ panel and pull the latest audit trail from the server.
-  const openStockHistory = async () => {
+  // Open the ประวัติ panel on the working day in progress; the date bar inside
+  // it steps back through earlier days.
+  const openStockHistory = () => {
     setShowStockHistory(true);
-    setHistoryLoading(true);
-    setHistoryError('');
-    try {
-      setStockHistory(await fetchStockHistory(200));
-    } catch (err) {
-      setHistoryError(err.message || 'โหลดประวัติการบันทึกสต็อกไม่สำเร็จ');
-    } finally {
-      setHistoryLoading(false);
-    }
+    setHistoryDate(workdayKey());
   };
 
   const renderActiveSubTab = () => {
@@ -2052,96 +2089,6 @@ function StaffView({
         );
       }
 
-      case 'timeclock': {
-        // My recent records, newest first (today included), for quick reference.
-        const myRecords = (timeclock || [])
-          .filter((r) => r.user === activeStaffUser)
-          .sort((a, b) => (b.inAt || 0) - (a.inAt || 0))
-          .slice(0, 7);
-        const done = myClockToday && myClockToday.outAt;
-        return (
-          <div className="space-y-4">
-            <div className="border-l-4 border-amber-600 pl-2">
-              <h2 className="font-extrabold text-sm font-kanit uppercase tracking-wider text-neutral-400">ลงเวลาเข้า-ออกงาน</h2>
-            </div>
-
-            {/* TODAY CARD */}
-            <div className="bg-admin-card border rounded-2xl p-5 shadow-xs space-y-4 text-center">
-              <div>
-                {/* The WORKING day, not the wall date: at 01:00 the record still
-                    belongs to the shift that started the previous evening, so
-                    showing the calendar date here would contradict it. */}
-                <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider block">
-                  วันทำงาน · {new Date(`${todayKey}T12:00:00`).toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long' })}
-                </span>
-                <span className="font-kanit font-extrabold text-base text-neutral-800">{activeStaffUser || 'ไม่ได้เข้าสู่ระบบ'}</span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
-                  <span className="text-[10px] font-bold text-emerald-600 uppercase flex items-center justify-center gap-1"><LogIn className="w-3 h-3" /> เวลาเข้า</span>
-                  <span className="font-mono font-extrabold text-lg text-emerald-700 block">{clockFmt(myClockToday?.inAt)}</span>
-                </div>
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-                  <span className="text-[10px] font-bold text-amber-600 uppercase flex items-center justify-center gap-1"><LogOut className="w-3 h-3" /> เวลาออก</span>
-                  <span className="font-mono font-extrabold text-lg text-amber-700 block">{clockFmt(myClockToday?.outAt)}</span>
-                </div>
-              </div>
-
-              {done ? (
-                <div className="bg-neutral-100 text-neutral-500 font-bold py-3 rounded-xl text-xs">
-                  ✓ วันนี้ลงเวลาเข้า-ออกครบแล้ว
-                </div>
-              ) : (
-                <button
-                  onClick={handleClockPress}
-                  disabled={clockBusy || !activeStaffUser}
-                  className={`w-full font-bold py-3.5 rounded-xl text-sm transition flex items-center justify-center gap-2 disabled:opacity-50 ${
-                    myClockToday
-                      ? 'bg-amber-600 hover:bg-amber-700 text-white'
-                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                  }`}
-                >
-                  <Clock className="w-4 h-4" />
-                  <span>
-                    {clockBusy
-                      ? 'กำลังบันทึกเวลา…'
-                      : myClockToday ? 'ลงชื่อออกงาน' : 'ลงชื่อเข้างาน'}
-                  </span>
-                </button>
-              )}
-
-              <p className="text-[10px] text-neutral-400 font-medium">
-                ลงเวลาได้จากทุกที่ · เวลาที่บันทึกคือเวลาของเซิร์ฟเวอร์ ไม่ใช่เวลาในเครื่อง
-              </p>
-              <p className="text-[10px] text-neutral-400 font-medium">
-                นับเป็น 1 วันทำงาน ตั้งแต่ {String(WORKDAY_START_HOUR).padStart(2, '0')}:00 ถึง{' '}
-                {String(WORKDAY_START_HOUR).padStart(2, '0')}:00 ของวันถัดไป
-              </p>
-            </div>
-
-            {/* MY RECENT HISTORY */}
-            {myRecords.length > 0 && (
-              <div className="bg-admin-card border rounded-2xl overflow-hidden shadow-xs">
-                <div className="px-4 pt-3 pb-1 text-[10px] font-extrabold text-neutral-400 uppercase tracking-wider">ประวัติล่าสุดของฉัน</div>
-                <div className="divide-y divide-neutral-100">
-                  {myRecords.map((r) => (
-                    <div key={r.id} className="px-4 py-2.5 flex justify-between items-center text-xs font-thai">
-                      <span className="font-bold text-neutral-700">
-                        {new Date(r.inAt).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}
-                      </span>
-                      <span className="font-mono text-neutral-500">
-                        {clockFmt(r.inAt)} → {clockFmt(r.outAt)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      }
-
       default:
         return null;
     }
@@ -2171,16 +2118,32 @@ function StaffView({
         </button>
       )}
 
+      {/* STOCK CUTS WAITING TO BE SENT — the คลัง count is behind the tables
+          until these go through, so it stays on screen rather than a toast. */}
+      {pendingCuts > 0 && (
+        <button
+          onClick={() => retryStockCuts()}
+          className="w-full flex items-center gap-2.5 bg-red-50 border border-red-200 text-red-800 rounded-2xl px-3.5 py-2.5 text-left transition hover:bg-red-100 active:scale-[0.99]"
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span className="text-xs font-bold flex-1">
+            ตัดสต็อกค้าง {pendingCuts} รายการ — ยอดในคลังยังไม่อัปเดต
+            <span className="block text-[10px] font-semibold text-red-700/80">
+              ระบบลองส่งใหม่อัตโนมัติ · แตะเพื่อลองตอนนี้
+            </span>
+          </span>
+        </button>
+      )}
+
       {/* HORIZONTAL TAB CONTROL */}
       <div className="flex gap-1 bg-neutral-100 rounded-xl p-1 text-[9px] font-bold">
         {/* Ordered the way a shift runs: read the board, take an order, cook it,
-            then the two things touched occasionally (คลัง, ลงเวลา). */}
+            then the one thing touched occasionally (คลัง). */}
         {[
           { id: 'orders', label: 'บอร์ด', icon: ClipboardList },
           { id: 'take-order', label: 'รับออเดอร์', icon: PlusCircle },
           { id: 'kitchen', label: 'ครัว', icon: ChefHat },
           { id: 'stock', label: 'คลัง', icon: Package },
-          { id: 'timeclock', label: 'ลงเวลา', icon: Clock },
         ].map(tab => {
           const Icon = tab.icon;
           return (
@@ -2215,7 +2178,7 @@ function StaffView({
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
-                  onClick={openStockHistory}
+                  onClick={reloadStockHistory}
                   className="p-2 rounded-lg hover:bg-neutral-100 text-neutral-500"
                   title="รีเฟรช"
                 >
@@ -2231,6 +2194,10 @@ function StaffView({
               </div>
             </div>
 
+            <div className="px-4 pt-3">
+              <StockHistoryDateBar date={historyDate} onChange={setHistoryDate} />
+            </div>
+
             <div className="overflow-y-auto p-4 space-y-2">
               {historyLoading && (
                 <div className="p-6 text-center text-xs text-neutral-400 font-thai">กำลังโหลดประวัติ…</div>
@@ -2238,11 +2205,14 @@ function StaffView({
               {historyError && !historyLoading && (
                 <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-xs font-thai flex items-center justify-between gap-3">
                   <span>{historyError}</span>
-                  <button onClick={openStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
+                  <button onClick={reloadStockHistory} className="font-bold underline shrink-0">ลองใหม่</button>
                 </div>
               )}
               {!historyLoading && !historyError && stockHistory.length === 0 && (
-                <div className="p-6 text-center text-xs text-neutral-400 font-thai">ยังไม่มีประวัติการบันทึกสต็อก</div>
+                <div className="p-6 text-center text-xs text-neutral-400 font-thai">ไม่มีการบันทึกสต็อกในวันที่เลือก</div>
+              )}
+              {!historyLoading && !historyError && stockHistory.length >= STOCK_HISTORY_DAY_LIMIT && (
+                <p className="text-[10px] text-neutral-400 text-center font-thai">แสดง {STOCK_HISTORY_DAY_LIMIT} รายการล่าสุดของวันที่เลือกเท่านั้น</p>
               )}
               {!historyLoading && !historyError && stockHistory.map((h) => (
                 <div key={h.id} className="flex items-start gap-3 p-3 bg-admin-field rounded-2xl text-xs font-thai">
